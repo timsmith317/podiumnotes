@@ -1,0 +1,31 @@
+{
+  "expo": {
+    "name": "Podium Notes",
+    "slug": "podiumnotes",
+    "version": "1.0.0",
+    "orientation": "default",
+    "icon": "./assets/images/icon.png",
+    "scheme": "podiumnotes",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "splash": {
+      "backgroundColor": "#0f172a"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "app.podiumnotes.app",
+      "buildNumber": "1"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#0f172a"
+      },
+      "package": "app.podiumnotes.app"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-document-picker",
+      "expo-dev-client"
+    ]
+  }
+}
