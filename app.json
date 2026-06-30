@@ -7,14 +7,38 @@
     "icon": "./assets/images/icon.png",
     "scheme": "podiumnotes",
     "userInterfaceStyle": "automatic",
-    "newArchEnabled": true,
-    "splash": {
-      "backgroundColor": "#0f172a"
-    },
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "app.podiumnotes.app",
-      "buildNumber": "1"
+      "buildNumber": "1",
+      "appleTeamId": "6B2J525R6Q",
+      "infoPlist": {
+        "CFBundleDocumentTypes": [
+          {
+            "CFBundleTypeName": "Plain Text",
+            "CFBundleTypeRole": "Viewer",
+            "LSItemContentTypes": ["public.plain-text", "public.text", "public.utf8-plain-text"]
+          },
+          {
+            "CFBundleTypeName": "Markdown",
+            "CFBundleTypeRole": "Viewer",
+            "LSItemContentTypes": ["net.daringfireball.markdown"]
+          },
+          {
+            "CFBundleTypeName": "Rich Text",
+            "CFBundleTypeRole": "Viewer",
+            "LSItemContentTypes": ["public.rtf"]
+          },
+          {
+            "CFBundleTypeName": "Word Document",
+            "CFBundleTypeRole": "Viewer",
+            "LSItemContentTypes": ["org.openxmlformats.wordprocessingml.document"]
+          }
+        ],
+        "UISupportsDocumentBrowser": false,
+        "NSMicrophoneUsageDescription": "Podium Notes listens to your voice to scroll your script as you speak.",
+        "NSSpeechRecognitionUsageDescription": "Podium Notes uses on-device speech recognition to follow along with your script as you speak."
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -25,7 +49,27 @@
     "plugins": [
       "expo-router",
       "expo-document-picker",
-      "expo-dev-client"
-    ]
+      "expo-dev-client",
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#0f172a"
+        }
+      ],
+      [
+        "expo-share-intent",
+        {
+          "iosActivationRules": {
+            "NSExtensionActivationSupportsText": true,
+            "NSExtensionActivationSupportsWebURLWithMaxCount": 1
+          }
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "REPLACE_WITH_YOUR_EAS_PROJECT_ID"
+      }
+    }
   }
 }
