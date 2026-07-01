@@ -21,8 +21,8 @@ import { ui, IS_TABLET } from '../../lib/scale';
 // Presenter font ladders — iPad gets a much taller ceiling for podium-distance reading
 const FONT_SIZES_PHONE  = [18, 22, 26, 30, 36, 42];
 const FONT_SIZES_TABLET = [22, 28, 34, 42, 52, 64, 76];
-// Cap the presenter/editor text column so lines stay readable on wide screens
-const MAX_TEXT_WIDTH = 760;
+// Body uses the full screen width on both phone and tablet — a notes-reading
+// app benefits from edge-to-edge text. The list does the same.
 
 // Editorial serif for titles (system serif; no bundled font needed)
 const SERIF_FONT = Platform.OS === 'ios' ? 'Georgia' : 'serif';
@@ -37,7 +37,13 @@ const VOICE_RECENT_WORDS   = 4;   // trailing spoken words used to find your pla
 const VOICE_SEARCH_AHEAD   = 24;  // how far ahead in the script we look (words)
 const VOICE_MIN_RUN        = 3;   // contiguous matched words required to move
 const VOICE_MAX_JUMP_WORDS = 14;  // refuse to advance further than this in one step
-const VOICE_LEAD_LINES     = 2;   // keep your live spot this many lines above the matched word
+// Voice-tracking lead — how many text lines to place the matched word above
+// the band center, on the assumption that the user is already that many lines
+// past what iOS just transcribed. Different by device: iPad's larger text
+// means each line is a bigger absolute lift, and Speech Recognition latency
+// seems to differ too. Tune each device independently.
+const VOICE_LEAD_LINES_PHONE  = 2;
+const VOICE_LEAD_LINES_TABLET = 1;
 
 // Layout constants (heights below the safe-area inset)
 const TOP_BAR_H   = ui(38);   // Back / Present bar
@@ -59,8 +65,8 @@ export default function EditorScreen() {
   const FONT_SIZES = IS_TABLET ? FONT_SIZES_TABLET : FONT_SIZES_PHONE;
   const bodyFont = IS_TABLET ? 30 : 26;
   const bodyLH = bodyFont * 1.55;
-  const presPadX = IS_TABLET ? Math.max(22, (width - MAX_TEXT_WIDTH) / 2) : 22;
-  const editPadX = IS_TABLET ? Math.max(18, (width - MAX_TEXT_WIDTH) / 2) : 18;
+  const presPadX = 22;
+  const editPadX = 18;
 
   const note = getNote(id);
   const [body, setBody] = useState(note?.body ?? '');
@@ -76,13 +82,6 @@ export default function EditorScreen() {
   const [progress, setProgress] = useState(0);
   const [voiceOn, setVoiceOn] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
-  // Captured ONCE at mount and never updated. The presenter ScrollView's
-  // contentOffset prop must be reference-stable: getScrollSync(id) reads a
-  // cache that lags real scroll position by ~400ms (the onScroll debounce),
-  // so if we passed `{y: getScrollSync(id)}` inline it would change between
-  // renders and RN would re-apply it — snapping a fresh jumpToTop/jumpToBottom
-  // back to the stale cached position on the next progress-tick re-render.
-  const [initialContentOffset] = useState(() => ({ x: 0, y: getScrollSync(id) }));
   const bodyInputRef = useRef(null);
   const scrollRef = useRef(null);
   const scrollYRef = useRef(0);
@@ -106,7 +105,7 @@ export default function EditorScreen() {
   useKeepAwake();
 
   useEffect(() => {
-    console.log('PODIUM_NOTES_EDITOR build-30 mounted');
+    console.log('PODIUM_NOTES_EDITOR build-39 mounted');
     navigation.setOptions({ headerShown: false });
   }, []);
 
@@ -126,6 +125,19 @@ export default function EditorScreen() {
   useEffect(() => {
     if (!presenting && voiceOn) stopVoice();
   }, [presenting]);
+
+  // Defensive: when the menu opens in present mode, iOS's UIScrollView can
+  // snap to y=0 as a side effect of the absolute-positioned menu overlays
+  // being added to the ScrollView's parent (a native re-layout side effect
+  // that isn't triggered by our JS code path). Restore the scroll position
+  // to whatever the user was reading on the next frame — before iOS commits
+  // the reset visually — so the reader stays put across menu toggles.
+  useEffect(() => {
+    if (!menuOpen || !presenting) return;
+    const y = presScrollYRef.current;
+    if (y <= 0) return;
+    requestAnimationFrame(() => presScrollRef.current?.scrollTo({ y, animated: false }));
+  }, [menuOpen, presenting]);
 
   useFocusEffect(
     useCallback(() => {
@@ -164,18 +176,19 @@ export default function EditorScreen() {
     setEditing(false);
   }
 
-  // On entering edit mode, hold the scroll where the user was reading —
-  // focusing a tall input otherwise jumps the view to the end. The caret
-  // itself is placed via the controlled `selection` prop below.
+  // On entering edit mode, release the controlled selection after a short
+  // delay so the user can move the caret freely. iOS auto-scrolls to make
+  // the caret visible on focus — which is what we want, since the caret is
+  // placed at the tap location via the `selection` prop. Previously this
+  // effect also fired multiple scrollTo calls to "hold" the reading position
+  // (guarding against a bug where a focused tall TextInput jumped to the
+  // end), but that fought user scrolling within ~400ms of tapping to edit
+  // and also caused a snap-to-top on hamburger tap (blur → render switch).
+  // The `selection` prop already prevents the jump-to-end.
   useEffect(() => {
     if (!editing) return;
-    const y = scrollYRef.current;
-    const restore = () => scrollRef.current?.scrollTo({ y, animated: false });
-    const t1 = setTimeout(restore, 50);
-    const t2 = setTimeout(restore, 180);
-    const t3 = setTimeout(restore, 380);
     const tc = setTimeout(() => setSel(null), 350);
-    return () => { clearTimeout(t1); clearTimeout(t2); clearTimeout(t3); clearTimeout(tc); };
+    return () => clearTimeout(tc);
   }, [editing]);
 
   useEffect(() => {
@@ -348,7 +361,7 @@ export default function EditorScreen() {
   // But the matched word is the one you *just* spoke — by the time iOS
   // transcribes it and we scroll, you're already a beat further on. Centering
   // that already-spoken word leaves what you're saying *now* below the band.
-  // VOICE_LEAD_LINES lifts the matched word above center so your live spot
+  // VOICE_LEAD_LINES_* lifts the matched word above center so your live spot
   // rides inside the band instead of trailing under it.
   function scrollToOffset(offset) {
     const ls = lineStartsRef.current;
@@ -356,7 +369,8 @@ export default function EditorScreen() {
     const line = ls.find(l => offset >= l.start && offset <= l.end) || ls[ls.length - 1];
     if (line.y === lastScrollLineRef.current) return;
     lastScrollLineRef.current = line.y;
-    const lead = VOICE_LEAD_LINES * (line.h || 0);
+    const leadLines = IS_TABLET ? VOICE_LEAD_LINES_TABLET : VOICE_LEAD_LINES_PHONE;
+    const lead = leadLines * (line.h || 0);
     const target = Math.max(0, line.y + line.h / 2 - bandHeight / 2 + lead);
     presScrollRef.current?.scrollTo({ y: target, animated: true });
   }
@@ -467,6 +481,14 @@ export default function EditorScreen() {
     }
   }
 
+  // Home — pop everything back to the note list, regardless of how deep we
+  // are. popToTop is React Navigation's "go to the first screen of this
+  // stack"; since the (notes) layout has index as its first screen, this
+  // lands the user on the list with a clean history.
+  function jumpHome() {
+    navigation.popToTop();
+  }
+
   // Popover menu — shared between presenter and editor. Each caller passes
   // an items array; ordering in the array is ordering on screen. Each item:
   // { label: string, icon: SF Symbol name, onPress: () => void }.
@@ -482,7 +504,10 @@ export default function EditorScreen() {
         />
         <Pressable
           onPress={() => {}}
-          style={[styles.menuPositioner, { top: insets.top + TOP_BAR_H + ui(4) }]}
+          style={[styles.menuPositioner, {
+            top: insets.top + TOP_BAR_H + ui(4),
+            right: insets.right + ui(12),
+          }]}
         >
           <View style={styles.menuShadow}>
             <View style={[styles.menuCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
@@ -566,7 +591,7 @@ export default function EditorScreen() {
             Side slots are flex:1 spacers; only the inner buttons receive
             touches. Just Back on the left and a hamburger on the right —
             Settings, Edit, and the top/bottom jumps live in the popover. */}
-        <View style={[styles.topBar, { paddingTop: insets.top, backgroundColor: colors.bg, borderBottomColor: colors.border }]}>
+        <View style={[styles.topBar, { paddingTop: Math.max(insets.top, ui(8)), paddingLeft: insets.left + ui(16), paddingRight: insets.right + ui(16), backgroundColor: colors.bg, borderBottomColor: colors.border }]}>
           <View style={styles.topBarSideStart}>
             <TouchableOpacity
               style={styles.topBarBackInner}
@@ -619,11 +644,12 @@ export default function EditorScreen() {
           contentContainerStyle={{
             paddingTop: clampedBandTop - presenterContentTop,
             paddingBottom: height - clampedBandTop - bandHeight + hudClear + 8,
-            paddingHorizontal: presPadX,
+            paddingLeft: insets.left + presPadX,
+            paddingRight: insets.right + presPadX,
           }}
           showsVerticalScrollIndicator={false}
           scrollEventThrottle={16}
-          contentOffset={initialContentOffset}
+          scrollsToTop={false}
           onLayout={e => { presViewportH.current = e.nativeEvent.layout.height; }}
           onContentSizeChange={(w, h) => {
             presContentH.current = h;
@@ -700,6 +726,7 @@ export default function EditorScreen() {
           { label: 'Go to top',    icon: 'arrow.up',           onPress: jumpToTop },
           { label: 'Go to bottom', icon: 'arrow.down',         onPress: jumpToBottom },
           { label: 'Edit',         icon: 'square.and.pencil',  onPress: () => setPresenting(false) },
+          { label: 'Home',         icon: 'house',              onPress: jumpHome },
           { label: 'Settings',     icon: 'gearshape',          onPress: () => router.push('/settings') },
         ])}
       </View>
@@ -710,7 +737,7 @@ export default function EditorScreen() {
   if (reviewing) {
     return (
       <View style={[styles.flex, { backgroundColor: colors.bg }]}>
-        <View style={[styles.topBar, { paddingTop: insets.top, backgroundColor: colors.bg, borderBottomColor: colors.border }]}>
+        <View style={[styles.topBar, { paddingTop: Math.max(insets.top, ui(8)), paddingLeft: insets.left + ui(16), paddingRight: insets.right + ui(16), backgroundColor: colors.bg, borderBottomColor: colors.border }]}>
           <TouchableOpacity
             style={styles.topBarBack}
             onPress={() => setReviewing(false)}
@@ -728,7 +755,7 @@ export default function EditorScreen() {
         </View>
         <ScrollView
           style={styles.flex}
-          contentContainerStyle={[styles.bodyContent, { paddingHorizontal: editPadX, paddingBottom: insets.bottom + 24 }]}
+          contentContainerStyle={[styles.bodyContent, { paddingLeft: insets.left + editPadX, paddingRight: insets.right + editPadX, paddingBottom: insets.bottom + 24 }]}
           showsVerticalScrollIndicator={true}
         >
           <Text style={{ color: colors.text, fontFamily: ff, fontSize: bodyFont, lineHeight: bodyLH }}>
@@ -756,11 +783,11 @@ export default function EditorScreen() {
       keyboardVerticalOffset={0}
     >
 
-      {/* Top bar — Back | Import (when empty) | Hamburger
-          Check spelling moved into the menu so the bar stays clean.
-          Import stays as a primary CTA only on brand-new empty notes —
-          it's the single most important action on a fresh note. */}
-      <View style={[styles.topBar, { paddingTop: insets.top, backgroundColor: colors.bg, borderBottomColor: colors.border }]}>
+      {/* Top bar — Back | (empty) | Hamburger
+          Import (when empty) and Check spelling (when content) both live in
+          the menu now, so the bar stays uniform between empty and authored
+          notes. Center stays in place as a layout balancer. */}
+      <View style={[styles.topBar, { paddingTop: Math.max(insets.top, ui(8)), paddingLeft: insets.left + ui(16), paddingRight: insets.right + ui(16), backgroundColor: colors.bg, borderBottomColor: colors.border }]}>
         <View style={styles.topBarSideStart}>
           <TouchableOpacity
             style={styles.topBarBackInner}
@@ -774,17 +801,7 @@ export default function EditorScreen() {
             <Text style={[styles.topBarText, { color: colors.text }]}> Back</Text>
           </TouchableOpacity>
         </View>
-        <View style={styles.topBarCenter}>
-          {isEmpty && (
-            <TouchableOpacity
-              style={[styles.topBarBtn, { backgroundColor: colors.surface, borderColor: colors.border }]}
-              onPress={handlePickImport}
-              hitSlop={{ top: 10, bottom: 10, left: 8, right: 8 }}
-            >
-              <Text style={[styles.topBarBtnText, { color: colors.text }]}>Import</Text>
-            </TouchableOpacity>
-          )}
-        </View>
+        <View style={styles.topBarCenter} />
         <View style={styles.topBarSideEnd}>
           <TouchableOpacity
             style={styles.hamburgerBtn}
@@ -822,10 +839,11 @@ export default function EditorScreen() {
       <ScrollView
         ref={scrollRef}
         style={styles.flex}
-        contentContainerStyle={[styles.bodyContent, { paddingHorizontal: editPadX, paddingBottom: insets.bottom + 24 }]}
+        contentContainerStyle={[styles.bodyContent, { paddingLeft: insets.left + editPadX, paddingRight: insets.right + editPadX, paddingBottom: insets.bottom + 24 }]}
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode="interactive"
         scrollEventThrottle={16}
+        scrollsToTop={false}
         onScroll={e => { scrollYRef.current = e.nativeEvent.contentOffset.y; }}
         showsVerticalScrollIndicator={true}
       >
@@ -880,14 +898,19 @@ export default function EditorScreen() {
       </TouchableOpacity>
     )}
 
-    {/* Popover menu — Check spelling appears only when there's something to check. */}
+    {/* Popover menu. Third slot swaps based on note state:
+        - empty note  -> Import (the action you want on a fresh note)
+        - has content -> Check spelling
+        Home appears in every menu for consistent orientation. */}
     {renderMenu([
       { label: 'Go to top',    icon: 'arrow.up',          onPress: jumpToTop },
       { label: 'Go to bottom', icon: 'arrow.down',        onPress: jumpToBottom },
-      ...(isEmpty ? [] : [
-        { label: 'Check spelling', icon: 'checkmark.circle', onPress: handleCheck },
-      ]),
-      { label: 'Settings',     icon: 'gearshape',         onPress: () => router.push('/settings') },
+      ...(isEmpty
+        ? [{ label: 'Import',         icon: 'square.and.arrow.down', onPress: handlePickImport }]
+        : [{ label: 'Check spelling', icon: 'checkmark.circle',      onPress: handleCheck }]
+      ),
+      { label: 'Home',     icon: 'house',     onPress: jumpHome },
+      { label: 'Settings', icon: 'gearshape', onPress: () => router.push('/settings') },
     ])}
     </View>
   );

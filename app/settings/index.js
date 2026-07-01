@@ -5,7 +5,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { useSettings, themeColors } from '../../lib/useSettings';
-import { uis } from '../../lib/scale';
+import { uis, uit } from '../../lib/scale';
 
 const THEME_OPTIONS = [
   { label: 'System', value: 'system' },
@@ -113,9 +113,16 @@ export default function SettingsScreen() {
   return (
     <View style={[styles.container, { backgroundColor: colors.bg }]}>
 
-      {/* Custom header — matches the list; title scales with the rest of the screen */}
+      {/* Custom header. paddingTop is a small fixed value (uis(6)) rather
+          than insets.top — the modal presentation on iPad reports a small
+          nonzero insets.top from formSheet/pageSheet chrome that we don't
+          want to also pad against. On iPhone in full-screen modal this
+          would put content under the status bar, but that presentation
+          isn't in use here. */}
       <View style={[styles.header, {
-        paddingTop: uis(8),
+        paddingTop: uis(6),
+        paddingLeft: insets.left,
+        paddingRight: insets.right,
         backgroundColor: colors.headerBg,
         borderBottomColor: colors.border,
       }]}>
@@ -136,7 +143,11 @@ export default function SettingsScreen() {
 
       <ScrollView
         style={styles.flex}
-        contentContainerStyle={[styles.content, { paddingBottom: insets.bottom + 32 }]}
+        contentContainerStyle={[styles.content, {
+          paddingBottom: insets.bottom + 32,
+          paddingLeft: insets.left + uis(20),
+          paddingRight: insets.right + uis(20),
+        }]}
       >
         <SectionLabel label="Theme" />
         <SegRow
@@ -263,20 +274,20 @@ const styles = StyleSheet.create({
   // Custom header (mirrors the notes list)
   header: { borderBottomWidth: StyleSheet.hairlineWidth },
   headerInner: {
-    height: uis(40),
+    height: uis(32),
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: uis(16),
   },
   headerSide:      { flex: 1 },
   headerSideRight: { alignItems: 'flex-end' },
-  headerTitle:     { flex: 2, textAlign: 'center', fontSize: uis(20), fontWeight: '800' },
-  headerDone:      { fontSize: uis(17), fontWeight: '600' },
+  headerTitle:     { flex: 2, textAlign: 'center', fontSize: uit(18), fontWeight: '700', letterSpacing: -0.2 },
+  headerDone:      { fontSize: uit(17), fontWeight: '600' },
 
   content:   { paddingHorizontal: uis(20), paddingTop: uis(8) },
 
   sectionLabel: {
-    fontSize: uis(12), fontWeight: '700',
+    fontSize: uit(12), fontWeight: '700',
     textTransform: 'uppercase', letterSpacing: 0.8,
     marginTop: uis(28), marginBottom: uis(10),
   },
@@ -289,29 +300,33 @@ const styles = StyleSheet.create({
   },
   segBtnFlex: { flex: 1 },
   segBtnWrap: { paddingHorizontal: uis(18) },
-  segBtnText: { fontWeight: '600', fontSize: uis(14) },
+  segBtnText: { fontWeight: '600', fontSize: uit(14) },
 
   // Stepper — matches segBtn's visual vocabulary (surface bg, hairline border,
   // matching radius) so it sits inside the same design system as the chips.
-  stepperRow:        { flexDirection: 'row', alignItems: 'center', gap: uis(12) },
+  // Row is center-justified rather than stretching the value column with
+  // flex:1: on iPad that stretch pushes the minus/plus to screen edges. A
+  // minWidth on the value column keeps positioning stable as the number
+  // grows/shrinks (80 → 220).
+  stepperRow:        { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: uis(12) },
   stepperBtn: {
     width: uis(44), height: uis(44),
     borderRadius: uis(10), borderWidth: 1,
     alignItems: 'center', justifyContent: 'center',
   },
-  stepperBtnText:    { fontSize: uis(22), fontWeight: '600', lineHeight: uis(24) },
-  stepperValueWrap:  { flex: 1, alignItems: 'center' },
-  stepperValue:      { fontSize: uis(26), fontWeight: '700', lineHeight: uis(30) },
-  stepperUnit:       { fontSize: uis(12), marginTop: uis(2) },
+  stepperBtnText:    { fontSize: uit(22), fontWeight: '600', lineHeight: uit(24) },
+  stepperValueWrap:  { minWidth: uit(160), alignItems: 'center' },
+  stepperValue:      { fontSize: uit(26), fontWeight: '700', lineHeight: uit(30) },
+  stepperUnit:       { fontSize: uit(12), marginTop: uis(2) },
 
   colorScroll:   { paddingVertical: uis(4), gap: uis(10), paddingRight: uis(8) },
   colorSwatch:   { width: uis(40), height: uis(40), borderRadius: uis(20), alignItems: 'center', justifyContent: 'center' },
   colorSwatchOn:    { borderWidth: 3, borderColor: '#fff' },
   colorSwatchClear: { borderWidth: 1.5, borderColor: '#94a3b8', borderStyle: 'dashed' },
-  colorCheck:       { color: '#fff', fontWeight: '800', fontSize: uis(16) },
-  colorCheckDark:   { color: '#475569', fontWeight: '800', fontSize: uis(16) },
-  colorLabel:    { fontSize: uis(13), marginTop: uis(8) },
+  colorCheck:       { color: '#fff', fontWeight: '800', fontSize: uit(16) },
+  colorCheckDark:   { color: '#475569', fontWeight: '800', fontSize: uit(16) },
+  colorLabel:    { fontSize: uit(13), marginTop: uis(8) },
 
-  fadeDesc: { fontSize: uis(13), lineHeight: uis(18), marginBottom: uis(10) },
-  hint:     { marginTop: uis(32), fontSize: uis(13), lineHeight: uis(20), textAlign: 'center' },
+  fadeDesc: { fontSize: uit(13), lineHeight: uit(18), marginBottom: uis(10) },
+  hint:     { marginTop: uis(32), fontSize: uit(13), lineHeight: uit(20), textAlign: 'center' },
 });

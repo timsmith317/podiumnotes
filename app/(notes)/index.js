@@ -10,7 +10,7 @@ import { Swipeable } from 'react-native-gesture-handler';
 import { SymbolView } from 'expo-symbols';
 import { useNotes } from '../../lib/useNotes';
 import { useSettings, themeColors } from '../../lib/useSettings';
-import { ui, uic } from '../../lib/scale';
+import { ui, uic, uit } from '../../lib/scale';
 import { formatDate } from '../../lib/utils';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
@@ -106,7 +106,10 @@ export default function NotesListScreen() {
         />
         <Pressable
           onPress={() => {}}
-          style={[styles.menuPositioner, { top: insets.top + HEADER_H + ui(4) }]}
+          style={[styles.menuPositioner, {
+            top: insets.top + HEADER_H + ui(4),
+            right: insets.right + ui(12),
+          }]}
         >
           <View style={styles.menuShadow}>
             <View style={[styles.menuCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
@@ -160,8 +163,11 @@ export default function NotesListScreen() {
 
   const renderItem = useCallback(({ item }) => {
     const isPdf = item.kind === 'pdf';
+    // Slice at 300 (not 80): enough for 2 lines of preview at Text's
+    // numberOfLines={2} on the widest iPad without wasteful measurement of
+    // the entire body. RN handles the final truncation with an ellipsis.
     const preview = isPdf ? 'PDF document — opens in presenter'
-      : (item.body?.trim().slice(0, 80) || 'Empty note');
+      : (item.body?.trim().slice(0, 300) || 'Empty note');
     const wordCount = isPdf ? 0 : item.body.split(/\s+/).filter(Boolean).length;
     // Per-user pace from settings; ?? 130 covers the upgrade window where
     // a stored settings blob predates the new field.
@@ -221,7 +227,9 @@ export default function NotesListScreen() {
 
       {/* Custom header — plain View, no native nav bar, no Liquid Glass */}
       <View style={[styles.customHeader, {
-        paddingTop: insets.top,
+        paddingTop: Math.max(insets.top, ui(8)),
+        paddingLeft: insets.left,
+        paddingRight: insets.right,
         backgroundColor: colors.headerBg,
         borderBottomColor: colors.border,
       }]}>
@@ -262,7 +270,7 @@ export default function NotesListScreen() {
         renderItem={renderItem}
         contentContainerStyle={[
           notes.length === 0 ? styles.emptyContainer : styles.listContent,
-          { paddingBottom: insets.bottom + ui(80) },
+          { paddingBottom: insets.bottom + ui(80), paddingLeft: insets.left, paddingRight: insets.right },
         ]}
         ItemSeparatorComponent={() => <View style={[styles.separator, { backgroundColor: colors.border }]} />}
         ListEmptyComponent={
@@ -275,14 +283,15 @@ export default function NotesListScreen() {
         }
       />
 
-      {/* Popover menu — same shape as the editor. New note + Import live
-          here because creating notes is a list-page action; jumping to
-          top/bottom helps when the list grows long. */}
+      {/* Popover menu — same shape as the editor. Home is included here as
+          a no-op so the menu reads the same on every screen; tapping it
+          just closes the menu (you're already home). */}
       {renderMenu([
         { label: 'Go to top',    icon: 'arrow.up',   onPress: jumpToTop },
         { label: 'Go to bottom', icon: 'arrow.down', onPress: jumpToBottom },
         { label: 'New note',     icon: 'plus',       onPress: handleNew },
         { label: 'Import',       icon: 'square.and.arrow.down', onPress: handlePickImport },
+        { label: 'Home',         icon: 'house',      onPress: () => {} },
         { label: 'Settings',     icon: 'gearshape',  onPress: () => router.push('/settings') },
       ])}
     </View>
@@ -315,7 +324,7 @@ const styles = StyleSheet.create({
   },
   markBarOuter: { width: uic(15), height: uic(3),   borderRadius: uic(1.5), backgroundColor: '#e2e8f0', marginVertical: uic(1.2) },
   markBarMid:   { width: uic(15), height: uic(4.6), borderRadius: uic(2),   backgroundColor: '#34d399', marginVertical: uic(1.2) },
-  headerTitleText: { fontSize: ui(18), fontWeight: '700', letterSpacing: -0.2 },
+  headerTitleText: { fontSize: uit(18), fontWeight: '700', letterSpacing: -0.2 },
   rowTitleLine:    { flexDirection: 'row', alignItems: 'center', gap: ui(6) },
   pdfBadge:        { width: ui(18), height: ui(18), borderRadius: ui(4), borderWidth: 1, alignItems: 'center', justifyContent: 'center' },
 
@@ -326,9 +335,9 @@ const styles = StyleSheet.create({
 
   row:        { flexDirection: 'row', alignItems: 'center', paddingHorizontal: ui(16), paddingVertical: ui(14) },
   rowInner:   { flex: 1 },
-  rowTitle:   { fontSize: ui(17), fontWeight: '700', marginBottom: ui(3) },
-  rowMeta:    { fontSize: ui(12), marginBottom: ui(4) },
-  rowPreview: { fontSize: ui(14), lineHeight: ui(20) },
+  rowTitle:   { fontSize: uit(17), fontWeight: '700', marginBottom: ui(3) },
+  rowMeta:    { fontSize: uit(12), marginBottom: ui(4) },
+  rowPreview: { fontSize: uit(14), lineHeight: uit(20) },
   rowChevron: { fontSize: ui(22), marginLeft: ui(8) },
 
   deleteAction:     { backgroundColor: '#dc2626', justifyContent: 'center', alignItems: 'center', width: ui(80) },
