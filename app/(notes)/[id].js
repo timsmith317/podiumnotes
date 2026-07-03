@@ -55,7 +55,7 @@ export default function EditorScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { width, height } = useWindowDimensions();
-  const { getNote, updateNote, deleteNote, createNote } = useNotes();
+  const { getNote, updateNote, deleteNote, createNote, flushSync } = useNotes();
   const { settings } = useSettings();
   const colorScheme = useColorScheme();
   const colors = themeColors(settings.themeMode, colorScheme);
@@ -166,6 +166,13 @@ export default function EditorScreen() {
         clearScroll(id);
       } else {
         setScroll(id, presScrollYRef.current);
+        // Commit the LATEST content to local first, THEN flush to cloud. The
+        // autosave effect's cleanup cancels its pending 400ms save on unmount,
+        // so the final keystrokes may not be in the store yet — write them now
+        // from latestRef (always current) before flushing, or the flush would
+        // push stale content and a later pull would overwrite the lost edits.
+        updateNote(id, { title: t, body: b });
+        flushSync(id);
       }
     };
   }, []);
