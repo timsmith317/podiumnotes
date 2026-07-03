@@ -161,7 +161,8 @@ export default function SettingsScreen() {
           would put content under the status bar, but that presentation
           isn't in use here. */}
       <View style={[styles.header, {
-        paddingTop: uis(6),
+        paddingTop: uis(12),
+        paddingBottom: uis(10),
         paddingLeft: insets.left,
         paddingRight: insets.right,
         backgroundColor: colors.headerBg,

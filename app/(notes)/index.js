@@ -28,6 +28,13 @@ export default function NotesListScreen() {
   const { settings } = useSettings();
   const colorScheme = useColorScheme();
   const colors = themeColors(settings.themeMode, colorScheme);
+  // Is the active theme a dark-background one? Mirrors themeColors' own logic.
+  // Drives the wordmark: light theme (incl. sepia/ice) → DARK mark tile so it
+  // contrasts with the light header and reads distinct from the hamburger;
+  // dark theme → LIGHT mark tile. The mark is always the opposite lightness of
+  // the header, so it always reads as a badge, never blends in.
+  const isDarkTheme = settings.themeMode === 'dark'
+    || (settings.themeMode === 'system' && colorScheme === 'dark');
   // Track each row's Swipeable by note id, and which row is currently open, so
   // opening one closes the previously-open one — while an open row STAYS open
   // until you tap Delete, tap the row, swipe it back, or open another row.
@@ -300,10 +307,10 @@ export default function NotesListScreen() {
         <View style={styles.customHeaderInner}>
           {/* Brand — left-aligned, matching the landing nav */}
           <View style={styles.brand}>
-            <View style={[styles.mark, { backgroundColor: colors.surface, borderColor: colors.border }]}>
-              <View style={[styles.markBarOuter, { backgroundColor: colors.text }]} />
+            <View style={[styles.mark, isDarkTheme ? styles.markLight : styles.markDark]}>
+              <View style={[styles.markBarOuter, isDarkTheme ? styles.markBarOuterLight : styles.markBarOuterDark]} />
               <View style={styles.markBarMid} />
-              <View style={[styles.markBarOuter, { backgroundColor: colors.text }]} />
+              <View style={[styles.markBarOuter, isDarkTheme ? styles.markBarOuterLight : styles.markBarOuterDark]} />
             </View>
             <Text style={[styles.headerTitleText, { color: colors.text }]}>Podium Notes</Text>
           </View>
@@ -391,10 +398,15 @@ const styles = StyleSheet.create({
   hamburgerLine: { height: ui(2), width: '100%', borderRadius: ui(1) },
   mark: {
     width: uic(28), height: uic(28), borderRadius: uic(7),
-    borderWidth: uic(1),
     alignItems: 'center', justifyContent: 'center',
   },
-  markBarOuter: { width: uic(15), height: uic(3),   borderRadius: uic(1.5), marginVertical: uic(1.2) },
+  // Dark-tile mark — shown in LIGHT themes (contrasts with light header).
+  markDark:  { backgroundColor: '#14213a' },
+  // Light-tile mark — shown in DARK theme (contrasts with dark header).
+  markLight: { backgroundColor: '#ffffff', borderWidth: uic(1), borderColor: '#e2e8f0' },
+  markBarOuter:      { width: uic(15), height: uic(3), borderRadius: uic(1.5), marginVertical: uic(1.2) },
+  markBarOuterDark:  { backgroundColor: '#e2e8f0' },   // light-grey bars on the navy tile
+  markBarOuterLight: { backgroundColor: '#0f172a' },   // near-black bars on the white tile
   markBarMid:   { width: uic(15), height: uic(4.6), borderRadius: uic(2),   backgroundColor: '#34d399', marginVertical: uic(1.2) },
   headerTitleText: { fontSize: uit(18), fontWeight: '700', letterSpacing: -0.2 },
   rowTitleLine:    { flexDirection: 'row', alignItems: 'center', gap: ui(6) },
