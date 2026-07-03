@@ -50,7 +50,8 @@ const TOP_BAR_H   = ui(38);   // Back / Present bar
 const TITLE_BAR_H = ui(36);   // fixed centered title strip
 
 export default function EditorScreen() {
-  const { id } = useLocalSearchParams();
+  const { id, edit } = useLocalSearchParams();
+  const startInEdit = edit === '1';
   const navigation = useNavigation();
   const router = useRouter();
   const insets = useSafeAreaInsets();
@@ -71,12 +72,18 @@ export default function EditorScreen() {
   const note = getNote(id);
   const [body, setBody] = useState(note?.body ?? '');
   const [title, setTitle] = useState(note?.title ?? '');
-  const [presenting, setPresenting] = useState(!!note?.body);
+  // Open directly in edit mode when navigated with ?edit=1 (swipe-right-to-edit
+  // from the list); otherwise open in presenter if the note has content.
+  const [presenting, setPresenting] = useState(!!note?.body && !startInEdit);
   const [reviewing, setReviewing] = useState(false);
   const [misspellings, setMisspellings] = useState([]);
   const [fontIndex, setFontIndex] = useState(2);
-  const [editing, setEditing] = useState(false);
-  const [sel, setSel] = useState(null);
+  const [editing, setEditing] = useState(startInEdit);
+  // When opening straight into edit mode (swipe-to-edit), start the caret at the
+  // very top. Without an explicit selection, a focused multiline TextInput with
+  // content defaults to caret-at-end / scrolled-to-bottom, which isn't the
+  // wanted default. (Tap-to-edit sets its own selection from the tap location.)
+  const [sel, setSel] = useState(startInEdit ? { start: 0, end: 0 } : null);
   const [keyboardVisible, setKeyboardVisible] = useState(false);
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   const [progress, setProgress] = useState(0);
@@ -105,7 +112,6 @@ export default function EditorScreen() {
   useKeepAwake();
 
   useEffect(() => {
-    console.log('PODIUM_NOTES_EDITOR build-39 mounted');
     navigation.setOptions({ headerShown: false });
   }, []);
 
@@ -171,7 +177,9 @@ export default function EditorScreen() {
         // so the final keystrokes may not be in the store yet — write them now
         // from latestRef (always current) before flushing, or the flush would
         // push stale content and a later pull would overwrite the lost edits.
-        updateNote(id, { title: t, body: b });
+        // sync:false so this local commit doesn't schedule a debounced push
+        // that would duplicate the immediate flush below.
+        updateNote(id, { title: t, body: b }, { sync: false });
         flushSync(id);
       }
     };

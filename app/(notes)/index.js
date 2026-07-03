@@ -28,7 +28,11 @@ export default function NotesListScreen() {
   const { settings } = useSettings();
   const colorScheme = useColorScheme();
   const colors = themeColors(settings.themeMode, colorScheme);
-  const openSwipeableRef = useRef(null);
+  // Track each row's Swipeable by note id, and which row is currently open, so
+  // opening one closes the previously-open one — while an open row STAYS open
+  // until you tap Delete, tap the row, swipe it back, or open another row.
+  const swipeableRefs = useRef({});
+  const openRowId = useRef(null);
   const listRef = useRef(null);
   const [menuOpen, setMenuOpen] = useState(false);
 
@@ -152,6 +156,9 @@ export default function NotesListScreen() {
   }
 
   function handleDelete(item) {
+    // Close the swipe row when acting on it — on Cancel it tidies back shut;
+    // on Delete the row is removed anyway.
+    swipeableRefs.current[item.id]?.close();
     Alert.alert(
       'Delete Note',
       `Delete "${item.title || 'Untitled'}"? This cannot be undone.`,
@@ -180,6 +187,28 @@ export default function NotesListScreen() {
     );
   }
 
+  function handleEdit(item) {
+    swipeableRefs.current[item.id]?.close();
+    if (item.kind === 'pdf') return;         // PDFs can't be text-edited (button is greyed)
+    router.push(`/${item.id}?edit=1`);       // open the note directly in edit mode
+  }
+
+  // Left-swipe (swipe right) reveals a green Edit action — a shortcut straight
+  // into the editor, skipping presenter → menu → Edit. Greyed + inert for PDFs.
+  function renderLeftActions(item) {
+    const isPdf = item.kind === 'pdf';
+    return (
+      <TouchableOpacity
+        style={[styles.editAction, isPdf && styles.editActionDisabled]}
+        onPress={() => handleEdit(item)}
+        activeOpacity={isPdf ? 1 : 0.85}
+        disabled={isPdf}
+      >
+        <Text style={[styles.editActionText, isPdf && styles.editActionTextDisabled]}>Edit</Text>
+      </TouchableOpacity>
+    );
+  }
+
   const renderItem = useCallback(({ item }) => {
     const isPdf = item.kind === 'pdf';
     // Slice at 300 (not 80): enough for 2 lines of preview at Text's
@@ -200,21 +229,37 @@ export default function NotesListScreen() {
     return (
       <Swipeable
         renderRightActions={() => renderRightActions(item)}
+        renderLeftActions={() => renderLeftActions(item)}
         rightThreshold={40}
-        onSwipeableOpen={() => {
-          if (openSwipeableRef.current) {
-            openSwipeableRef.current.close();
+        leftThreshold={40}
+        ref={ref => { swipeableRefs.current[item.id] = ref; }}
+        onSwipeableWillOpen={() => {
+          // Close the previously-open row (if it's a different one) so only one
+          // is open at a time. This row then stays open on its own.
+          const prev = openRowId.current;
+          if (prev && prev !== item.id) {
+            swipeableRefs.current[prev]?.close();
           }
+          openRowId.current = item.id;
         }}
-        ref={ref => { if (ref) openSwipeableRef.current = ref; }}
+        onSwipeableClose={() => {
+          if (openRowId.current === item.id) openRowId.current = null;
+        }}
         overshootRight={false}
         useNativeAnimations={false}
       >
         <TouchableOpacity
           style={[styles.row, { backgroundColor: colors.bg }]}
-          onPress={() => isPdf
-            ? router.push({ pathname: '/pdf-present', params: { uri: item.fileUri, name: item.title || 'PDF', id: item.id } })
-            : router.push(`/${item.id}`)}
+          onPress={() => {
+            // If this row is swiped open, a tap just closes it (don't navigate).
+            if (openRowId.current === item.id) {
+              swipeableRefs.current[item.id]?.close();
+              return;
+            }
+            isPdf
+              ? router.push({ pathname: '/pdf-present', params: { uri: item.fileUri, name: item.title || 'PDF', id: item.id } })
+              : router.push(`/${item.id}`);
+          }}
           activeOpacity={0.7}
         >
           <View style={styles.rowInner}>
@@ -255,10 +300,10 @@ export default function NotesListScreen() {
         <View style={styles.customHeaderInner}>
           {/* Brand — left-aligned, matching the landing nav */}
           <View style={styles.brand}>
-            <View style={styles.mark}>
-              <View style={styles.markBarOuter} />
+            <View style={[styles.mark, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+              <View style={[styles.markBarOuter, { backgroundColor: colors.text }]} />
               <View style={styles.markBarMid} />
-              <View style={styles.markBarOuter} />
+              <View style={[styles.markBarOuter, { backgroundColor: colors.text }]} />
             </View>
             <Text style={[styles.headerTitleText, { color: colors.text }]}>Podium Notes</Text>
           </View>
@@ -346,9 +391,10 @@ const styles = StyleSheet.create({
   hamburgerLine: { height: ui(2), width: '100%', borderRadius: ui(1) },
   mark: {
     width: uic(28), height: uic(28), borderRadius: uic(7),
-    backgroundColor: '#14213a', alignItems: 'center', justifyContent: 'center',
+    borderWidth: uic(1),
+    alignItems: 'center', justifyContent: 'center',
   },
-  markBarOuter: { width: uic(15), height: uic(3),   borderRadius: uic(1.5), backgroundColor: '#e2e8f0', marginVertical: uic(1.2) },
+  markBarOuter: { width: uic(15), height: uic(3),   borderRadius: uic(1.5), marginVertical: uic(1.2) },
   markBarMid:   { width: uic(15), height: uic(4.6), borderRadius: uic(2),   backgroundColor: '#34d399', marginVertical: uic(1.2) },
   headerTitleText: { fontSize: uit(18), fontWeight: '700', letterSpacing: -0.2 },
   rowTitleLine:    { flexDirection: 'row', alignItems: 'center', gap: ui(6) },
@@ -368,6 +414,10 @@ const styles = StyleSheet.create({
 
   deleteAction:     { backgroundColor: '#dc2626', justifyContent: 'center', alignItems: 'center', width: ui(80) },
   deleteActionText: { color: '#fff', fontWeight: '700', fontSize: ui(15) },
+  editAction:         { backgroundColor: '#15803d', justifyContent: 'center', alignItems: 'center', width: ui(80) },
+  editActionText:     { color: '#fff', fontWeight: '700', fontSize: ui(15) },
+  editActionDisabled: { backgroundColor: '#9ca3af' },
+  editActionTextDisabled: { color: '#e5e7eb' },
 
   empty:      { flex: 1, alignItems: 'center', justifyContent: 'center', padding: ui(40) },
   emptyTitle: { fontSize: ui(20), fontWeight: '700', marginBottom: ui(10) },
