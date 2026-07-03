@@ -64,6 +64,12 @@
             "NSExtensionActivationSupportsWebURLWithMaxCount": 1
           }
         }
+      ],
+      [
+        "react-native-icloud-kit/plugin/withICloud",
+        {
+          "containerIdentifier": "iCloud.app.podiumnotes.app"
+        }
       ]
     ],
     "extra": {

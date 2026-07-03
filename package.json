@@ -4,23 +4,24 @@
   "main": "index.js",
   "dependencies": {
     "@react-native-async-storage/async-storage": "2.2.0",
-    "expo": "~56.0.13",
+    "expo": "~56.0.14",
     "expo-constants": "~56.0.18",
-    "expo-dev-client": "~56.0.21",
+    "expo-dev-client": "~56.0.22",
     "expo-document-picker": "^56.0.4",
     "expo-file-system": "^56.0.8",
     "expo-font": "~56.0.7",
     "expo-keep-awake": "^56.0.3",
-    "expo-linking": "^56.0.14",
-    "expo-router": "~56.2.12",
+    "expo-linking": "~56.0.15",
+    "expo-router": "~56.2.13",
     "expo-share-intent": "^7.0.0",
-    "expo-sharing": "~56.0.19",
-    "expo-splash-screen": "~56.0.11",
+    "expo-sharing": "~56.0.20",
+    "expo-splash-screen": "~56.0.12",
     "expo-status-bar": "~56.0.4",
     "expo-symbols": "~56.0.6",
     "react": "19.2.3",
     "react-native": "0.85.3",
     "react-native-gesture-handler": "~2.31.1",
+    "react-native-icloud-kit": "^0.1.8",
     "react-native-safe-area-context": "~5.7.0",
     "react-native-screens": "^4.25.2",
     "react-native-webview": "13.16.1"
@@ -37,5 +38,13 @@
   "private": true,
   "devDependencies": {
     "typescript": "~6.0.3"
+  },
+  "expo": {
+    "doctor": {
+      "reactNativeDirectoryCheck": {
+        "exclude": ["react-native-icloud-kit", "speech-follow", "spell-check"],
+        "listUnknownPackages": false
+      }
+    }
   }
 }

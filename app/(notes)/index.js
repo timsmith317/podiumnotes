@@ -1,7 +1,7 @@
 // app/(notes)/index.js
 import { useEffect, useState, useRef, useCallback } from 'react';
 import {
-  View, Text, FlatList, TouchableOpacity, Pressable, StyleSheet,
+  View, Text, FlatList, TouchableOpacity, Pressable, StyleSheet, RefreshControl,
   useColorScheme, Image, Alert,
 } from 'react-native';
 import { useRouter, useNavigation } from 'expo-router';
@@ -24,13 +24,32 @@ export default function NotesListScreen() {
   const router = useRouter();
   const navigation = useNavigation();
   const insets = useSafeAreaInsets();
-  const { notes, createNote, deleteNote } = useNotes();
+  const { notes, createNote, deleteNote, refresh } = useNotes();
   const { settings } = useSettings();
   const colorScheme = useColorScheme();
   const colors = themeColors(settings.themeMode, colorScheme);
   const openSwipeableRef = useRef(null);
   const listRef = useRef(null);
   const [menuOpen, setMenuOpen] = useState(false);
+
+  // Pull-to-refresh: manually trigger a cloud reconcile (pull notes + honor
+  // deletions). Sync otherwise runs only on app launch; this lets the user
+  // fetch changes on demand — e.g. after adding or deleting a note on another
+  // device — without restarting the app. refresh() (from useNotes) updates the
+  // sync layer's snapshot to the current notes, then reconciles, so the list
+  // updates itself via the remote-change path.
+  const [refreshing, setRefreshing] = useState(false);
+  const handleRefresh = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      await refresh();     // refreshes the sync snapshot, then reconciles
+    } catch (e) {
+      // reconcile errors surface in the diagnostics panel; nothing to do here
+    } finally {
+      // brief floor so the spinner doesn't flicker out instantly on a fast sync
+      setTimeout(() => setRefreshing(false), 400);
+    }
+  }, [refresh]);
 
   // Hide the native header entirely — we draw our own below
   useEffect(() => {
@@ -268,6 +287,13 @@ export default function NotesListScreen() {
         data={notes}
         keyExtractor={item => item.id}
         renderItem={renderItem}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={handleRefresh}
+            tintColor={colors.textMuted}
+          />
+        }
         contentContainerStyle={[
           notes.length === 0 ? styles.emptyContainer : styles.listContent,
           { paddingBottom: insets.bottom + ui(80), paddingLeft: insets.left, paddingRight: insets.right },
