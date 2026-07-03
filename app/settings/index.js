@@ -1,11 +1,36 @@
 // app/settings/index.js
+import { useState, useEffect } from 'react';
 import {
-  View, Text, StyleSheet, TouchableOpacity, ScrollView, useColorScheme,
+  View, Text, StyleSheet, TouchableOpacity, ScrollView, Pressable, useColorScheme,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { useSettings, themeColors } from '../../lib/useSettings';
 import { uis, uit } from '../../lib/scale';
+import { getDiagnostics, SYNC_STATUS } from '../../lib/sync';
+
+// Human-readable relative time for "last sync". Kept tiny — this only ever
+// formats a recent-ish timestamp for the diagnostics panel.
+function relTime(ms) {
+  if (!ms) return '—';
+  const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+  if (s < 60) return `${s}s ago`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.round(m / 60);
+  return `${h}h ago`;
+}
+
+// Status → dot color. The three signal colors are fixed so they read the same
+// across every theme; idle / no-account fall back to the theme's muted tone.
+function statusColor(status, colors) {
+  switch (status) {
+    case SYNC_STATUS.SYNCING: return '#15803d';   // green
+    case SYNC_STATUS.ERROR:   return '#b91c1c';   // red
+    case SYNC_STATUS.OFFLINE: return '#b45309';   // amber
+    default:                  return colors.textMuted;  // idle / no-account
+  }
+}
 
 const THEME_OPTIONS = [
   { label: 'System', value: 'system' },
@@ -78,6 +103,22 @@ export default function SettingsScreen() {
   const colorScheme = useColorScheme();
   const colors = themeColors(settings.themeMode, colorScheme);
 
+  // Hidden sync diagnostics — revealed by long-pressing the "Settings" title.
+  // Status and pending count change over time, so while the panel is open we
+  // re-read getDiagnostics() once a second. getDiagnostics() is a cheap
+  // module-state snapshot and is valid even before CloudKit is wired, so this
+  // is safe to ship ahead of the sync call sites being finalized.
+  const [diagOpen, setDiagOpen] = useState(false);
+  const [diag, setDiag] = useState(null);
+
+  useEffect(() => {
+    if (!diagOpen) return;
+    const refresh = () => { try { setDiag(getDiagnostics()); } catch (e) { setDiag(null); } };
+    refresh();
+    const t = setInterval(refresh, 1000);
+    return () => clearInterval(t);
+  }, [diagOpen]);
+
   function SectionLabel({ label }) {
     return <Text style={[styles.sectionLabel, { color: colors.textMuted }]}>{label}</Text>;
   }
@@ -128,7 +169,14 @@ export default function SettingsScreen() {
       }]}>
         <View style={styles.headerInner}>
           <View style={styles.headerSide} />
-          <Text style={[styles.headerTitle, { color: colors.text }]}>Settings</Text>
+          <Text
+            style={[styles.headerTitle, { color: colors.text }]}
+            onLongPress={() => setDiagOpen(true)}
+            delayLongPress={600}
+            suppressHighlighting
+          >
+            Settings
+          </Text>
           <View style={[styles.headerSide, styles.headerSideRight]}>
             <TouchableOpacity
               onPress={() => router.back()}
@@ -263,6 +311,60 @@ export default function SettingsScreen() {
           Font size and spellcheck can be adjusted per note using the controls in the editor and presenter.
         </Text>
       </ScrollView>
+
+      {/* Hidden sync diagnostics panel. Absolute overlay (not a nested Modal —
+          the app avoids modal-in-modal; matches the editor's menu pattern).
+          Tap the backdrop or Close to dismiss. */}
+      {diagOpen && (
+        <View style={styles.diagBackdrop}>
+          <Pressable style={StyleSheet.absoluteFill} onPress={() => setDiagOpen(false)} />
+          <View style={[styles.diagCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+            <View style={styles.diagHeaderRow}>
+              <Text style={[styles.diagTitle, { color: colors.text }]}>Sync Diagnostics</Text>
+              <TouchableOpacity onPress={() => setDiagOpen(false)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                <Text style={[styles.diagClose, { color: colors.textMuted }]}>Close</Text>
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.diagRow}>
+              <Text style={[styles.diagLabel, { color: colors.textMuted }]}>Status</Text>
+              <View style={styles.diagStatusWrap}>
+                <View style={[styles.diagDot, { backgroundColor: statusColor(diag?.status, colors) }]} />
+                <Text style={[styles.diagValue, { color: colors.text }]}>{diag?.status ?? '—'}</Text>
+              </View>
+            </View>
+
+            <View style={styles.diagRow}>
+              <Text style={[styles.diagLabel, { color: colors.textMuted }]}>Last sync</Text>
+              <Text style={[styles.diagValue, { color: colors.text }]}>{relTime(diag?.lastSyncAt)}</Text>
+            </View>
+
+            <View style={styles.diagRow}>
+              <Text style={[styles.diagLabel, { color: colors.textMuted }]}>Pending pushes</Text>
+              <Text style={[styles.diagValue, { color: colors.text }]}>{diag?.pendingCount ?? 0}</Text>
+            </View>
+
+            <View style={styles.diagRow}>
+              <Text style={[styles.diagLabel, { color: colors.textMuted }]}>Tombstones</Text>
+              <Text style={[styles.diagValue, { color: colors.text }]}>{diag?.tombstones ?? 0}</Text>
+            </View>
+
+            <View style={styles.diagRow}>
+              <Text style={[styles.diagLabel, { color: colors.textMuted }]}>Engine started</Text>
+              <Text style={[styles.diagValue, { color: colors.text }]}>{diag?.started ? 'yes' : 'no'}</Text>
+            </View>
+
+            {diag?.lastError ? (
+              <View style={styles.diagErrorWrap}>
+                <Text style={[styles.diagLabel, { color: colors.textMuted }]}>Last error</Text>
+                <Text style={[styles.diagError, { color: '#b91c1c' }]} numberOfLines={4}>
+                  {diag.lastError}
+                </Text>
+              </View>
+            ) : null}
+          </View>
+        </View>
+      )}
     </View>
   );
 }
@@ -329,4 +431,36 @@ const styles = StyleSheet.create({
 
   fadeDesc: { fontSize: uit(13), lineHeight: uit(18), marginBottom: uis(10) },
   hint:     { marginTop: uis(32), fontSize: uit(13), lineHeight: uit(20), textAlign: 'center' },
+
+  // Sync diagnostics overlay
+  diagBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: 'rgba(0,0,0,0.35)',
+    paddingHorizontal: uis(24),
+  },
+  diagCard: {
+    width: '100%', maxWidth: uis(420),
+    borderRadius: uis(16), borderWidth: 1,
+    padding: uis(18),
+    // subtle lift off the backdrop
+    shadowColor: '#000', shadowOpacity: 0.2, shadowRadius: 20, shadowOffset: { width: 0, height: 8 },
+    elevation: 8,
+  },
+  diagHeaderRow: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    marginBottom: uis(14),
+  },
+  diagTitle: { fontSize: uit(17), fontWeight: '700', letterSpacing: -0.2 },
+  diagClose: { fontSize: uit(15), fontWeight: '600' },
+  diagRow: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingVertical: uis(7),
+  },
+  diagLabel: { fontSize: uit(13) },
+  diagValue: { fontSize: uit(14), fontWeight: '600' },
+  diagStatusWrap: { flexDirection: 'row', alignItems: 'center', gap: uis(7) },
+  diagDot: { width: uis(9), height: uis(9), borderRadius: uis(5) },
+  diagErrorWrap: { marginTop: uis(10) },
+  diagError: { fontSize: uit(12), lineHeight: uit(17), marginTop: uis(4) },
 });
