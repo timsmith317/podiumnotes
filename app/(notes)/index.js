@@ -24,7 +24,8 @@ export default function NotesListScreen() {
   const router = useRouter();
   const navigation = useNavigation();
   const insets = useSafeAreaInsets();
-  const { notes, createNote, deleteNote, refresh } = useNotes();
+  const { notes, createNote, deleteNote, refresh, reorderNotes } = useNotes();
+  const [reorderMode, setReorderMode] = useState(false);
   const { settings } = useSettings();
   const colorScheme = useColorScheme();
   const colors = themeColors(settings.themeMode, colorScheme);
@@ -70,6 +71,18 @@ export default function NotesListScreen() {
   function handleNew() {
     const id = createNote();
     router.push(`/${id}`);
+  }
+
+  // Reorder (arrows): move a note one position up (dir -1) or down (dir +1).
+  // Local-only order via reorderNotes; end-caps are guarded so the first note
+  // can't move up and the last can't move down.
+  function moveNote(index, dir) {
+    const to = index + dir;
+    if (to < 0 || to >= notes.length) return;
+    const next = [...notes];
+    const [moved] = next.splice(index, 1);
+    next.splice(to, 0, moved);
+    reorderNotes(next);
   }
 
   // Import: same DocumentPicker flow as the editor, but the result lands in
@@ -252,11 +265,16 @@ export default function NotesListScreen() {
         onSwipeableClose={() => {
           if (openRowId.current === item.id) openRowId.current = null;
         }}
+        overshootLeft={false}
         overshootRight={false}
         useNativeAnimations={false}
       >
-        <TouchableOpacity
-          style={[styles.row, { backgroundColor: colors.bg }]}
+        <Pressable
+          style={({ pressed }) => [
+            styles.row,
+            { backgroundColor: pressed ? colors.surface : colors.bg },
+          ]}
+          delayPressIn={80}
           onPress={() => {
             // If this row is swiped open, a tap just closes it (don't navigate).
             if (openRowId.current === item.id) {
@@ -267,7 +285,6 @@ export default function NotesListScreen() {
               ? router.push({ pathname: '/pdf-present', params: { uri: item.fileUri, name: item.title || 'PDF', id: item.id } })
               : router.push(`/${item.id}`);
           }}
-          activeOpacity={0.7}
         >
           <View style={styles.rowInner}>
             <View style={styles.rowTitleLine}>
@@ -288,8 +305,69 @@ export default function NotesListScreen() {
             </Text>
           </View>
           <Text style={[styles.rowChevron, { color: colors.textFaint }]}>›</Text>
-        </TouchableOpacity>
+        </Pressable>
       </Swipeable>
+    );
+  }, [colors, notes, settings.wordsPerMinute]);
+
+  // Style A reorder row: the SAME full note row (title, meta, preview) but with
+  // a compact up/down arrow stack on the right instead of the chevron. No
+  // Swipeable, non-tappable — arrows are the only interaction. First row's up
+  // and last row's down are disabled (greyed), since they can't move further.
+  const renderReorderItem = useCallback(({ item, index }) => {
+    const isPdf = item.kind === 'pdf';
+    const preview = isPdf ? 'PDF document — opens in presenter'
+      : (item.body?.trim().slice(0, 300) || 'Empty note');
+    const wordCount = isPdf ? 0 : item.body.split(/\s+/).filter(Boolean).length;
+    const wpm = settings.wordsPerMinute ?? 130;
+    const speakMins = wordCount / wpm;
+    const timeStr = speakMins < 1 ? '<1 min' : `~${Math.round(speakMins)} min`;
+    const metaRight = isPdf ? 'PDF' : (wordCount > 0 ? `${wordCount} words · ${timeStr}` : 'Empty');
+    const isFirst = index === 0;
+    const isLast = index === notes.length - 1;
+    return (
+      <View style={[styles.row, styles.reorderRowRelative, { backgroundColor: colors.bg }]}>
+        <View style={styles.rowInner}>
+          <View style={styles.rowTitleLine}>
+            {isPdf && (
+              <View style={[styles.pdfBadge, { borderColor: colors.border }]}>
+                <SymbolView name="doc.text" size={ui(13)} tintColor={colors.textMuted} type="monochrome" />
+              </View>
+            )}
+            <Text style={[styles.rowTitle, { color: colors.text }]} numberOfLines={1}>
+              {item.title || (isPdf ? 'PDF' : 'Untitled')}
+            </Text>
+          </View>
+          <Text style={[styles.rowMeta, { color: colors.textMuted }]}>
+            {formatDate(item.updatedAt)} · {metaRight}
+          </Text>
+          <Text style={[styles.rowPreview, { color: colors.textMuted }]} numberOfLines={2}>
+            {preview}
+          </Text>
+        </View>
+        {/* Invisible spacer matching the normal row's chevron footprint, so the
+            text column (rowInner, flex:1) computes the SAME width as in normal
+            mode — no reflow when entering reorder. The arrows overlay on top. */}
+        <Text style={[styles.rowChevron, { color: 'transparent' }]}>›</Text>
+        <View style={styles.reorderArrows} pointerEvents="box-none">
+          <TouchableOpacity
+            onPress={() => moveNote(index, -1)}
+            disabled={isFirst}
+            style={[styles.reorderArrowBtn, { backgroundColor: colors.surface, borderColor: colors.border }, isFirst && styles.reorderArrowDisabled]}
+            hitSlop={{ top: 4, bottom: 4, left: 6, right: 6 }}
+          >
+            <SymbolView name="chevron.up" size={ui(22)} tintColor={isFirst ? colors.textFaint : colors.text} type="monochrome" />
+          </TouchableOpacity>
+          <TouchableOpacity
+            onPress={() => moveNote(index, 1)}
+            disabled={isLast}
+            style={[styles.reorderArrowBtn, { backgroundColor: colors.surface, borderColor: colors.border }, isLast && styles.reorderArrowDisabled]}
+            hitSlop={{ top: 4, bottom: 4, left: 6, right: 6 }}
+          >
+            <SymbolView name="chevron.down" size={ui(22)} tintColor={isLast ? colors.textFaint : colors.text} type="monochrome" />
+          </TouchableOpacity>
+        </View>
+      </View>
     );
   }, [colors, notes, settings.wordsPerMinute]);
 
@@ -317,20 +395,29 @@ export default function NotesListScreen() {
 
           <View style={styles.flexSpacer} />
 
-          {/* Single hamburger button — actions live in the popover so the
-              header stays clean and the pattern matches the editor screens. */}
-          <TouchableOpacity
-            style={styles.hamburgerBtn}
-            onPress={() => setMenuOpen(prev => !prev)}
-            activeOpacity={1}
-            hitSlop={{ top: 12, bottom: 12, left: 10, right: 10 }}
-          >
-            <View style={styles.hamburgerIcon}>
-              <View style={[styles.hamburgerLine, { backgroundColor: colors.text }]} />
-              <View style={[styles.hamburgerLine, { backgroundColor: colors.text }]} />
-              <View style={[styles.hamburgerLine, { backgroundColor: colors.text }]} />
-            </View>
-          </TouchableOpacity>
+          {reorderMode ? (
+            <TouchableOpacity
+              onPress={() => setReorderMode(false)}
+              hitSlop={{ top: 12, bottom: 12, left: 10, right: 10 }}
+            >
+              <Text style={[styles.reorderDoneText, { color: colors.text }]}>Done</Text>
+            </TouchableOpacity>
+          ) : (
+            /* Single hamburger button — actions live in the popover so the
+                header stays clean and the pattern matches the editor screens. */
+            <TouchableOpacity
+              style={styles.hamburgerBtn}
+              onPress={() => setMenuOpen(prev => !prev)}
+              activeOpacity={1}
+              hitSlop={{ top: 12, bottom: 12, left: 10, right: 10 }}
+            >
+              <View style={styles.hamburgerIcon}>
+                <View style={[styles.hamburgerLine, { backgroundColor: colors.text }]} />
+                <View style={[styles.hamburgerLine, { backgroundColor: colors.text }]} />
+                <View style={[styles.hamburgerLine, { backgroundColor: colors.text }]} />
+              </View>
+            </TouchableOpacity>
+          )}
         </View>
       </View>
 
@@ -338,19 +425,23 @@ export default function NotesListScreen() {
         ref={listRef}
         data={notes}
         keyExtractor={item => item.id}
-        renderItem={renderItem}
+        renderItem={reorderMode ? renderReorderItem : renderItem}
+        removeClippedSubviews={false}
         refreshControl={
-          <RefreshControl
-            refreshing={refreshing}
-            onRefresh={handleRefresh}
-            tintColor={colors.textMuted}
-          />
+          reorderMode ? undefined : (
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={handleRefresh}
+              tintColor={colors.textMuted}
+            />
+          )
         }
         contentContainerStyle={[
           notes.length === 0 ? styles.emptyContainer : styles.listContent,
           { paddingBottom: insets.bottom + ui(80), paddingLeft: insets.left, paddingRight: insets.right },
         ]}
         ItemSeparatorComponent={() => <View style={[styles.separator, { backgroundColor: colors.border }]} />}
+        ListFooterComponent={notes.length > 0 ? () => <View style={[styles.separator, { backgroundColor: colors.border }]} /> : null}
         ListEmptyComponent={
           <View style={styles.empty}>
             <Text style={[styles.emptyTitle, { color: colors.text }]}>No notes yet</Text>
@@ -369,6 +460,9 @@ export default function NotesListScreen() {
         { label: 'Go to bottom', icon: 'arrow.down', onPress: jumpToBottom },
         { label: 'New note',     icon: 'plus',       onPress: handleNew },
         { label: 'Import',       icon: 'square.and.arrow.down', onPress: handlePickImport },
+        ...(notes.length > 1
+          ? [{ label: 'Reorder notes', icon: 'arrow.up.arrow.down', onPress: () => { setMenuOpen(false); setReorderMode(true); } }]
+          : []),
         { label: 'Home',         icon: 'house',      onPress: () => {} },
         { label: 'Settings',     icon: 'gearshape',  onPress: () => router.push('/settings') },
       ])}
@@ -394,6 +488,18 @@ const styles = StyleSheet.create({
 
   // Hamburger button — manual three-line icon for consistent spacing.
   hamburgerBtn:  { padding: ui(4), borderRadius: ui(7) },
+  reorderDoneText: { fontSize: uit(17), fontWeight: '700' },
+  reorderRowRelative: { position: 'relative' },
+  reorderArrows: {
+    position: 'absolute', right: ui(12), top: 0, bottom: 0,
+    flexDirection: 'column', gap: ui(6),
+    alignItems: 'center', justifyContent: 'center',
+  },
+  reorderArrowBtn: {
+    width: ui(48), height: ui(38), borderRadius: ui(10),
+    borderWidth: 1, alignItems: 'center', justifyContent: 'center',
+  },
+  reorderArrowDisabled: { opacity: 0.35 },
   hamburgerIcon: { width: ui(22), height: ui(16), justifyContent: 'space-between' },
   hamburgerLine: { height: ui(2), width: '100%', borderRadius: ui(1) },
   mark: {
@@ -413,15 +519,15 @@ const styles = StyleSheet.create({
   pdfBadge:        { width: ui(18), height: ui(18), borderRadius: ui(4), borderWidth: 1, alignItems: 'center', justifyContent: 'center' },
 
   // List
-  listContent:    { paddingTop: ui(8) },
+  listContent:    { paddingTop: 0 },
   emptyContainer: { flex: 1 },
   separator:      { height: 1, marginLeft: ui(16) },
 
   row:        { flexDirection: 'row', alignItems: 'center', paddingHorizontal: ui(16), paddingVertical: ui(14) },
-  rowInner:   { flex: 1 },
+  rowInner:   { flex: 1, minWidth: 0, alignSelf: 'stretch' },
   rowTitle:   { fontSize: uit(17), fontWeight: '700', marginBottom: ui(3) },
   rowMeta:    { fontSize: uit(12), marginBottom: ui(4) },
-  rowPreview: { fontSize: uit(14), lineHeight: uit(20) },
+  rowPreview: { fontSize: uit(14), lineHeight: uit(20), width: '100%' },
   rowChevron: { fontSize: ui(22), marginLeft: ui(8) },
 
   deleteAction:     { backgroundColor: '#dc2626', justifyContent: 'center', alignItems: 'center', width: ui(80) },

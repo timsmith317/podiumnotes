@@ -16,6 +16,7 @@ import * as SpeechFollow from '../../modules/speech-follow';
 import { useSettings, themeColors, fontFamily } from '../../lib/useSettings';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
+import * as Print from 'expo-print';
 import { ui, IS_TABLET } from '../../lib/scale';
 
 // Presenter font ladders — iPad gets a much taller ceiling for podium-distance reading
@@ -553,6 +554,44 @@ export default function EditorScreen() {
     );
   }
 
+  // Print via the native iOS print sheet (AirPrint, Save to PDF, etc.).
+  // Renders a clean, paper-optimized layout — always light/serif regardless of
+  // the app's screen theme, since print is for paper, not the screen. Escapes
+  // the note text so any stray HTML characters render literally.
+  async function handlePrint() {
+    setMenuOpen(false);
+    const esc = (s) => String(s || '')
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const t = (latestRef.current.title || title || 'Untitled').trim();
+    const b = latestRef.current.body || body || '';
+    // Preserve paragraph breaks: split on blank lines → <p>, single newlines → <br>.
+    const paras = esc(b).split(/\n{2,}/).map(
+      p => `<p>${p.replace(/\n/g, '<br>')}</p>`
+    ).join('');
+    const words = b.trim() ? b.trim().split(/\s+/).length : 0;
+    const wpm = settings.wpm || 130;
+    const mins = Math.max(1, Math.round(words / wpm));
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8">
+      <style>
+        @page { margin: 1in; }
+        body { font-family: Georgia, 'Times New Roman', serif; color: #111;
+               font-size: 13pt; line-height: 1.7; }
+        h1 { font-size: 20pt; margin: 0 0 4pt; }
+        .meta { color: #666; font-size: 10pt; margin: 0 0 24pt;
+                border-bottom: 1px solid #ddd; padding-bottom: 12pt; }
+        p { margin: 0 0 12pt; }
+      </style></head><body>
+      <h1>${esc(t)}</h1>
+      <div class="meta">${words} words &middot; ~${mins} min at ${wpm} wpm</div>
+      ${paras}
+      </body></html>`;
+    try {
+      await Print.printAsync({ html });
+    } catch (e) {
+      // User cancelling the print sheet throws; ignore. Real errors are rare.
+    }
+  }
+
   function handleCheck() {
     handleDismissKeyboard();
     let found = [];
@@ -741,6 +780,7 @@ export default function EditorScreen() {
           { label: 'Go to top',    icon: 'arrow.up',           onPress: jumpToTop },
           { label: 'Go to bottom', icon: 'arrow.down',         onPress: jumpToBottom },
           { label: 'Edit',         icon: 'square.and.pencil',  onPress: () => setPresenting(false) },
+          { label: 'Print',        icon: 'printer',            onPress: handlePrint },
           { label: 'Home',         icon: 'house',              onPress: jumpHome },
           { label: 'Settings',     icon: 'gearshape',          onPress: () => router.push('/settings') },
         ])}
@@ -924,6 +964,7 @@ export default function EditorScreen() {
         ? [{ label: 'Import',         icon: 'square.and.arrow.down', onPress: handlePickImport }]
         : [{ label: 'Check spelling', icon: 'checkmark.circle',      onPress: handleCheck }]
       ),
+      ...(isEmpty ? [] : [{ label: 'Print', icon: 'printer', onPress: handlePrint }]),
       { label: 'Home',     icon: 'house',     onPress: jumpHome },
       { label: 'Settings', icon: 'gearshape', onPress: () => router.push('/settings') },
     ])}

@@ -8,6 +8,7 @@ import { useRouter } from 'expo-router';
 import { useSettings, themeColors } from '../../lib/useSettings';
 import { uis, uit } from '../../lib/scale';
 import { getDiagnostics, SYNC_STATUS } from '../../lib/sync';
+import PaceTrainer from '../../lib/PaceTrainer';
 
 // Human-readable relative time for "last sync". Kept tiny — this only ever
 // formats a recent-ish timestamp for the diagnostics panel.
@@ -103,6 +104,7 @@ export default function SettingsScreen() {
   const colorScheme = useColorScheme();
   const colors = themeColors(settings.themeMode, colorScheme);
 
+  const [trainerOpen, setTrainerOpen] = useState(false);
   // Hidden sync diagnostics — revealed by long-pressing the "Settings" title.
   // Status and pending count change over time, so while the panel is open we
   // re-read getDiagnostics() once a second. getDiagnostics() is a cheap
@@ -256,6 +258,15 @@ export default function SettingsScreen() {
         <Text style={[styles.fadeDesc, { color: colors.textMuted, marginTop: uis(10) }]}>
           Used to estimate how long each note will take to present. Most presenters land between 130 and 160.
         </Text>
+        <TouchableOpacity
+          style={[styles.measureBtn, { backgroundColor: colors.surface, borderColor: colors.border }]}
+          onPress={() => setTrainerOpen(true)}
+        >
+          <Text style={[styles.measureBtnText, { color: colors.text }]}>Measure My Pace</Text>
+          <Text style={[styles.measureBtnSub, { color: colors.textMuted }]}>
+            Not sure? Read three short passages aloud and we'll calculate it for you.
+          </Text>
+        </TouchableOpacity>
 
         <SectionLabel label="Band Height" />
         <SegRow
@@ -366,6 +377,15 @@ export default function SettingsScreen() {
           </View>
         </View>
       )}
+
+      <PaceTrainer
+        visible={trainerOpen}
+        colors={colors}
+        uis={uis}
+        uit={uit}
+        onApply={(wpm) => { if (wpm > 0) update({ wordsPerMinute: wpm }); }}
+        onClose={() => setTrainerOpen(false)}
+      />
     </View>
   );
 }
@@ -421,6 +441,9 @@ const styles = StyleSheet.create({
   stepperValueWrap:  { minWidth: uit(160), alignItems: 'center' },
   stepperValue:      { fontSize: uit(26), fontWeight: '700', lineHeight: uit(30) },
   stepperUnit:       { fontSize: uit(12), marginTop: uis(2) },
+  measureBtn:        { marginTop: uis(14), borderWidth: 1, borderRadius: uis(12), paddingVertical: uis(14), paddingHorizontal: uis(16), alignItems: 'center' },
+  measureBtnText:    { fontSize: uit(16), fontWeight: '700', textAlign: 'center' },
+  measureBtnSub:     { fontSize: uit(13), marginTop: uis(4), lineHeight: uit(18), textAlign: 'center' },
 
   colorScroll:   { paddingVertical: uis(4), gap: uis(10), paddingRight: uis(8) },
   colorSwatch:   { width: uis(40), height: uis(40), borderRadius: uis(20), alignItems: 'center', justifyContent: 'center' },
