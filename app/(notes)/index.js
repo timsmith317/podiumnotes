@@ -11,7 +11,6 @@ import { SymbolView } from 'expo-symbols';
 import { useNotes } from '../../lib/useNotes';
 import { useSettings, themeColors } from '../../lib/useSettings';
 import { ui, uic, uit } from '../../lib/scale';
-import { formatDate } from '../../lib/utils';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import { clearScroll } from '../../lib/scrollMemory';
@@ -298,7 +297,7 @@ export default function NotesListScreen() {
               </Text>
             </View>
             <Text style={[styles.rowMeta, { color: colors.textMuted }]}>
-              {formatDate(item.updatedAt)} · {metaRight}
+              {metaRight}
             </Text>
             <Text style={[styles.rowPreview, { color: colors.textMuted }]} numberOfLines={2}>
               {preview}
@@ -339,7 +338,7 @@ export default function NotesListScreen() {
             </Text>
           </View>
           <Text style={[styles.rowMeta, { color: colors.textMuted }]}>
-            {formatDate(item.updatedAt)} · {metaRight}
+            {metaRight}
           </Text>
           <Text style={[styles.rowPreview, { color: colors.textMuted }]} numberOfLines={2}>
             {preview}

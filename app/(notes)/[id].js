@@ -73,11 +73,17 @@ export default function EditorScreen() {
   const note = getNote(id);
   const [body, setBody] = useState(note?.body ?? '');
   const [title, setTitle] = useState(note?.title ?? '');
+  const [ignoredWords, setIgnoredWords] = useState(note?.ignoredWords ?? []);
   // Open directly in edit mode when navigated with ?edit=1 (swipe-right-to-edit
   // from the list); otherwise open in presenter if the note has content.
   const [presenting, setPresenting] = useState(!!note?.body && !startInEdit);
   const [reviewing, setReviewing] = useState(false);
   const [misspellings, setMisspellings] = useState([]);
+  const [reviewIndex, setReviewIndex] = useState(0);   // current finding in the carousel
+  const reviewScrollRef = useRef(null);
+  const findingYRef = useRef({});                       // measured y-offset of each finding
+  const bodyLinesRef = useRef([]);                      // per-line layout from onTextLayout
+  const bodyOffsetYRef = useRef(0);                     // body Text's y within the scroll content
   const [fontIndex, setFontIndex] = useState(2);
   const [editing, setEditing] = useState(startInEdit);
   // When opening straight into edit mode (swipe-to-edit), start the caret at the
@@ -592,41 +598,151 @@ export default function EditorScreen() {
     }
   }
 
+  // True if a finding's word is on this note's ignore list (case-insensitive).
+  function isIgnored(word, ignoreList) {
+    const list = ignoreList ?? ignoredWords;
+    const w = (word || '').toLowerCase();
+    return list.some(x => x.toLowerCase() === w);
+  }
+
   function handleCheck() {
     handleDismissKeyboard();
     let found = [];
-    try { found = Platform.OS === 'ios' ? spellCheck(body) : []; } catch (e) { found = []; }
+    try {
+      if (Platform.OS === 'ios') {
+        const titleHits = (spellCheck(title) || []).map(m => ({ ...m, field: 'title' }));
+        const bodyHits = (spellCheck(body) || []).map(m => ({ ...m, field: 'body' }));
+        found = [...titleHits, ...bodyHits];   // title findings first, then body
+      }
+    } catch (e) { found = []; }
+    found = found.filter(m => !isIgnored(m.word));
     if (!found.length) { Alert.alert('Spell check', 'No misspelled words found.'); return; }
     setMisspellings(found);
+    setReviewIndex(0);
     setReviewing(true);
   }
 
-  function handleFixMisspelling(m) {
-    const opts = (m.suggestions || []).slice(0, 4).map(s => ({
-      text: s,
-      onPress: () => {
-        const next = body.slice(0, m.start) + s + body.slice(m.start + m.length);
-        setBody(next);
-        let refound = [];
-        try { refound = Platform.OS === 'ios' ? spellCheck(next) : []; } catch (e) { refound = []; }
-        setMisspellings(refound);
-        if (!refound.length) setReviewing(false);
-      },
-    }));
-    Alert.alert(
-      m.word,
-      opts.length ? 'Choose a correction:' : 'No suggestions available.',
-      [...opts, { text: 'Ignore', style: 'cancel' }]
-    );
+  // Re-scan both fields after an edit, keeping field tags and honoring the
+  // per-note ignore list. Returns the combined, filtered list.
+  function rescanBoth(nextTitle, nextBody, ignoreList) {
+    try {
+      if (Platform.OS !== 'ios') return [];
+      const t = (spellCheck(nextTitle) || []).map(m => ({ ...m, field: 'title' }));
+      const b = (spellCheck(nextBody) || []).map(m => ({ ...m, field: 'body' }));
+      return [...t, ...b].filter(m => !isIgnored(m.word, ignoreList));
+    } catch (e) { return []; }
+  }
+
+  // Move to the next finding, or finish if we're at the end.
+  function advanceReview(fromIndex, list) {
+    const remaining = list ?? misspellings;
+    if (fromIndex + 1 >= remaining.length) {
+      setReviewing(false);
+      Alert.alert('Spell check', 'All done.');
+    } else {
+      setReviewIndex(fromIndex + 1);
+    }
+  }
+
+  // Apply a suggestion to the current finding, re-scan both fields, and advance.
+  function applySuggestion(suggestion) {
+    const m = misspellings[reviewIndex];
+    if (!m) return;
+    let nextTitle = title, nextBody = body;
+    if (m.field === 'title') {
+      nextTitle = title.slice(0, m.start) + suggestion + title.slice(m.start + m.length);
+      setTitle(nextTitle);
+    } else {
+      nextBody = body.slice(0, m.start) + suggestion + body.slice(m.start + m.length);
+      setBody(nextBody);
+    }
+    const refound = rescanBoth(nextTitle, nextBody);
+    setMisspellings(refound);
+    findingYRef.current = {};
+    if (!refound.length) {
+      setReviewing(false);
+      Alert.alert('Spell check', 'All done.');
+      return;
+    }
+    setReviewIndex(Math.min(reviewIndex, refound.length - 1));
+  }
+
+  // Skip: leave this word as-is, flag it again next time. Just advance.
+  function skipCurrent() {
+    advanceReview(reviewIndex);
+  }
+
+  // Ignore: accept this word in THIS note forever. Add to the per-note ignore
+  // list (persisted on the note), drop all its occurrences from the findings.
+  function ignoreCurrent() {
+    const m = misspellings[reviewIndex];
+    if (!m) { advanceReview(reviewIndex); return; }
+    const word = m.word;
+    const nextIgnore = isIgnored(word) ? ignoredWords : [...ignoredWords, word];
+    setIgnoredWords(nextIgnore);
+    updateNote(id, { ignoredWords: nextIgnore }, { sync: true });
+    const remaining = misspellings.filter(x => !isIgnored(x.word, nextIgnore));
+    setMisspellings(remaining);
+    findingYRef.current = {};
+    if (!remaining.length) {
+      setReviewing(false);
+      Alert.alert('Spell check', 'All done.');
+      return;
+    }
+    setReviewIndex(Math.min(reviewIndex, remaining.length - 1));
+  }
+
+  // Auto-scroll the review body to the current finding when it changes.
+  useEffect(() => {
+    if (!reviewing) return;
+    const m = misspellings[reviewIndex];
+    if (!m || m.field !== 'body') return;
+    const lines = bodyLinesRef.current;
+    if (!lines || !lines.length) return;
+    let acc = 0, targetY = 0;
+    for (const ln of lines) {
+      const len = ln.text ? ln.text.length : 0;
+      if (m.start <= acc + len) { targetY = ln.y; break; }
+      acc += len;
+    }
+    const y = Math.max(0, targetY + bodyOffsetYRef.current - ui(160));
+    const t = setTimeout(() => reviewScrollRef.current?.scrollTo({ y, animated: true }), 60);
+    return () => clearTimeout(t);
+  }, [reviewIndex, reviewing, misspellings]);
+
+  function renderReviewTitleSegments() {
+    const titleHits = misspellings.filter(m => m.field === 'title');
+    if (!titleHits.length) return title;
+    const segs = [];
+    let cursor = 0;
+    titleHits.forEach((m, i) => {
+      const globalIdx = misspellings.indexOf(m);
+      if (m.start > cursor) segs.push(<Text key={'tn' + i}>{title.slice(cursor, m.start)}</Text>);
+      const isCurrent = globalIdx === reviewIndex;
+      segs.push(
+        <Text key={'tm' + i} style={isCurrent ? styles.misspellCurrent : styles.misspell} onPress={() => setReviewIndex(globalIdx)}>
+          {title.slice(m.start, m.start + m.length)}
+        </Text>
+      );
+      cursor = m.start + m.length;
+    });
+    if (cursor < title.length) segs.push(<Text key="tt">{title.slice(cursor)}</Text>);
+    return segs;
   }
 
   function renderReviewSegments() {
     const segs = [];
     let cursor = 0;
     misspellings.forEach((m, i) => {
+      if (m.field !== 'body') return;
       if (m.start > cursor) segs.push(<Text key={'n' + i}>{body.slice(cursor, m.start)}</Text>);
+      const isCurrent = i === reviewIndex;
       segs.push(
-        <Text key={'m' + i} style={styles.misspell} onPress={() => handleFixMisspelling(m)}>
+        <Text
+          key={'m' + i}
+          style={isCurrent ? styles.misspellCurrent : styles.misspell}
+          onPress={() => setReviewIndex(i)}
+        >
           {body.slice(m.start, m.start + m.length)}
         </Text>
       );
@@ -790,33 +906,110 @@ export default function EditorScreen() {
 
   // ── REVIEW (spell check) MODE ──
   if (reviewing) {
+    const current = misspellings[reviewIndex];
+    const suggestions = (current?.suggestions || []).slice(0, 3);
+    const currentWord = current
+      ? (current.field === 'title' ? title : body).slice(current.start, current.start + current.length)
+      : '';
+
     return (
       <View style={[styles.flex, { backgroundColor: colors.bg }]}>
         <View style={[styles.topBar, { paddingTop: Math.max(insets.top, ui(8)), paddingLeft: insets.left + ui(16), paddingRight: insets.right + ui(16), backgroundColor: colors.bg, borderBottomColor: colors.border }]}>
+          <View style={styles.topBarBack} />
+          <View style={styles.topBarCenter}>
+            <Text style={[styles.topBarBtnText, { color: colors.text, fontWeight: '700' }]}>Spell check</Text>
+          </View>
           <TouchableOpacity
-            style={styles.topBarBack}
+            style={styles.topBarRight}
             onPress={() => setReviewing(false)}
             hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
           >
-            <Text style={[styles.topBarChevron, { color: colors.text }]}>‹</Text>
-            <Text style={[styles.topBarText, { color: colors.text }]}> Edit</Text>
+            <Text style={[styles.topBarBtnText, { color: colors.text, fontWeight: '700' }]}>Done</Text>
           </TouchableOpacity>
-          <View style={styles.topBarCenter}>
-            <Text style={[styles.topBarBtnText, { color: colors.textMuted }]}>
-              {misspellings.length} flagged
-            </Text>
-          </View>
-          <View style={styles.topBarRight} />
         </View>
+
         <ScrollView
+          ref={reviewScrollRef}
           style={styles.flex}
-          contentContainerStyle={[styles.bodyContent, { paddingLeft: insets.left + editPadX, paddingRight: insets.right + editPadX, paddingBottom: insets.bottom + 24 }]}
+          contentContainerStyle={[styles.bodyContent, { paddingLeft: insets.left + editPadX, paddingRight: insets.right + editPadX, paddingBottom: ui(24) }]}
           showsVerticalScrollIndicator={true}
         >
-          <Text style={{ color: colors.text, fontFamily: ff, fontSize: bodyFont, lineHeight: bodyLH }}>
+          {/* Title — highlighted if the current finding is in the title */}
+          {!!title && (
+            <Text style={{ color: colors.text, fontFamily: ff, fontSize: bodyFont * 1.3, fontWeight: '700', marginBottom: ui(12) }}>
+              {renderReviewTitleSegments()}
+            </Text>
+          )}
+          <Text
+            style={{ color: colors.text, fontFamily: ff, fontSize: bodyFont, lineHeight: bodyLH }}
+            onTextLayout={(e) => {
+              const raw = e.nativeEvent.lines || [];
+              bodyLinesRef.current = raw.map(l => ({ y: l.y, text: l.text }));
+              // First layout: scroll to the current finding once lines are known.
+              const m = misspellings[reviewIndex];
+              if (m && m.field === 'body') {
+                let acc = 0, targetY = 0;
+                for (const ln of bodyLinesRef.current) {
+                  const len = ln.text ? ln.text.length : 0;
+                  if (m.start <= acc + len) { targetY = ln.y; break; }
+                  acc += len;
+                }
+                const y = Math.max(0, targetY + bodyOffsetYRef.current - ui(160));
+                setTimeout(() => reviewScrollRef.current?.scrollTo({ y, animated: false }), 30);
+              }
+            }}
+            onLayout={(e) => { bodyOffsetYRef.current = e.nativeEvent.layout.y; }}
+          >
             {renderReviewSegments()}
           </Text>
         </ScrollView>
+
+        {/* Docked review bar — walks through findings one at a time. */}
+        <View style={[styles.reviewBar, { backgroundColor: colors.surface, borderTopColor: colors.border, paddingBottom: insets.bottom + ui(12) }]}>
+          <View style={styles.reviewBarHead}>
+            <View style={styles.reviewBarWord}>
+              <Text style={[styles.reviewBarWordText, { color: colors.text }]} numberOfLines={1}>
+                {currentWord}{current?.field === 'title' ? '  (title)' : ''}
+              </Text>
+            </View>
+            <Text style={[styles.reviewBarProgress, { color: colors.textMuted }]}>
+              {reviewIndex + 1} of {misspellings.length}
+            </Text>
+          </View>
+
+          {suggestions.length > 0 ? (
+            <>
+              <Text style={[styles.reviewReplaceLabel, { color: colors.textMuted }]}>Replace with:</Text>
+              <View style={styles.reviewChips}>
+                {suggestions.map((s, i) => (
+                  <TouchableOpacity
+                    key={s + i}
+                    style={[
+                      styles.reviewChip,
+                      i === 0
+                        ? { backgroundColor: '#15803d', borderColor: '#15803d' }
+                        : { backgroundColor: colors.bg, borderColor: colors.border },
+                    ]}
+                    onPress={() => applySuggestion(s)}
+                  >
+                    <Text style={[styles.reviewChipText, { color: i === 0 ? '#fff' : colors.text }]} numberOfLines={1}>{s}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </>
+          ) : (
+            <Text style={[styles.reviewNoSuggest, { color: colors.textMuted }]}>No suggestions</Text>
+          )}
+
+          <View style={styles.reviewActions}>
+            <TouchableOpacity style={[styles.reviewActionBtn, { borderColor: colors.border }]} onPress={skipCurrent}>
+              <Text style={[styles.reviewActionText, { color: colors.textMuted }]}>Skip</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={[styles.reviewActionBtn, { borderColor: colors.border }]} onPress={ignoreCurrent}>
+              <Text style={[styles.reviewActionText, { color: colors.textMuted }]}>Ignore</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
       </View>
     );
   }
@@ -1045,6 +1238,20 @@ const styles = StyleSheet.create({
   },
   fade: { position: 'absolute', left: 0, right: 0, zIndex: 9 },
   misspell: { color: '#dc2626', textDecorationLine: 'underline', textDecorationColor: '#dc2626' },
+  misspellCurrent: { color: '#dc2626', textDecorationLine: 'underline', textDecorationColor: '#dc2626', backgroundColor: 'rgba(220,38,38,0.14)', fontWeight: '700' },
+  reviewBar: { borderTopWidth: StyleSheet.hairlineWidth, paddingHorizontal: ui(16), paddingTop: ui(12) },
+  reviewBarHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: ui(10) },
+  reviewBarWord: { flex: 1, marginRight: ui(10) },
+  reviewBarWordText: { fontSize: ui(16), fontWeight: '700' },
+  reviewBarProgress: { fontSize: ui(13) },
+  reviewChips: { flexDirection: 'row', flexWrap: 'wrap', gap: ui(8), marginBottom: ui(12) },
+  reviewReplaceLabel: { fontSize: ui(13), marginBottom: ui(8) },
+  reviewChip: { paddingHorizontal: ui(14), paddingVertical: ui(8), borderRadius: ui(9), borderWidth: 1 },
+  reviewChipText: { fontSize: ui(15), fontWeight: '600' },
+  reviewNoSuggest: { fontSize: ui(14), fontStyle: 'italic', marginBottom: ui(12) },
+  reviewActions: { flexDirection: 'row', gap: ui(8) },
+  reviewActionBtn: { flex: 1, alignItems: 'center', paddingVertical: ui(10), borderRadius: ui(9), borderWidth: 1 },
+  reviewActionText: { fontSize: ui(15), fontWeight: '600' },
 
   // Floating presenter HUD
   hudWrap: {
