@@ -15,38 +15,47 @@
 // extension bundle ID + App Group from the (suffixed) main bundle ID at
 // prebuild time, so the share flow stays self-consistent per variant.
 //
+// NO DEV CLIENT: expo-dev-client is intentionally NOT installed or referenced.
+// It auto-injects dev-only Info.plist keys (_expo._tcp Bonjour service,
+// NSLocalNetworkUsageDescription about "development servers") into EVERY build
+// it's present in — including production — which looks unprofessional and can
+// draw App Review questions. Local development uses plain `expo start`. (This
+// matches The Filter List, which also ships without dev-client.)
+//
 // IMPORTANT (local builds): there is one ios/ folder, so switching variants
 // requires a clean prebuild each time, e.g.:
-//   Preview:  APP_VARIANT=preview     npx expo prebuild --clean -p ios && APP_VARIANT=preview     npx expo run:ios --configuration Release --device
-//   Dev:      APP_VARIANT=development npx expo prebuild --clean -p ios && APP_VARIANT=development npx expo run:ios --device
+//   Preview:  APP_VARIANT=preview npx expo prebuild --clean -p ios && APP_VARIANT=preview npx expo run:ios --configuration Release --device
 export default ({ config }) => {
-const variant = process.env.APP_VARIANT;
-const baseId = config.ios?.bundleIdentifier;
-const basePkg = config.android?.package;
-const variants = {
-development: {
-suffix: '.dev',
-name: `Dev · ${config.name}`,
-icon: './assets/images/icon-dev.png',
+  const variant = process.env.APP_VARIANT;
+  const baseId = config.ios?.bundleIdentifier;
+  const basePkg = config.android?.package;
+
+  const variants = {
+    development: {
+      suffix: '.dev',
+      name: `Dev · ${config.name}`,
+      icon: './assets/images/icon-dev.png',
     },
-preview: {
-suffix: '.preview',
-name: `Preview · ${config.name}`,
-icon: config.icon, // use the production app.json icon so Preview shows the real on-device look
+    preview: {
+      suffix: '.preview',
+      name: `Preview · ${config.name}`,
+      icon: config.icon, // use the production app.json icon so Preview shows the real on-device look
     },
   };
-const v = variants[variant];
-if (!v) return config; // production / unset → app.json unchanged
-return {
-...config,
-name: v.name,
-icon: v.icon,
-ios: {
-...config.ios,
-bundleIdentifier: `${baseId}${v.suffix}`,
+
+  const v = variants[variant];
+  if (!v) return config; // production / unset → app.json unchanged
+
+  return {
+    ...config,
+    name: v.name,
+    icon: v.icon,
+    ios: {
+      ...config.ios,
+      bundleIdentifier: `${baseId}${v.suffix}`,
     },
-...(basePkg
-? { android: { ...config.android, package: `${basePkg}${v.suffix}` } }
-: {}),
+    ...(basePkg
+      ? { android: { ...config.android, package: `${basePkg}${v.suffix}` } }
+      : {}),
   };
 };

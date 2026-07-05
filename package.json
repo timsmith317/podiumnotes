@@ -6,7 +6,6 @@
     "@react-native-async-storage/async-storage": "2.2.0",
     "expo": "~56.0.14",
     "expo-constants": "~56.0.18",
-    "expo-dev-client": "~56.0.22",
     "expo-document-picker": "^56.0.4",
     "expo-file-system": "^56.0.8",
     "expo-font": "~56.0.7",
@@ -29,7 +28,6 @@
   },
   "scripts": {
     "start": "expo start",
-    "start:dev": "expo start --dev-client",
     "ios": "expo run:ios",
     "android": "expo run:android",
     "web": "expo start --web",
