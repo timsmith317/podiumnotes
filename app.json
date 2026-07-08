@@ -11,6 +11,11 @@
       "supportsTablet": true,
       "bundleIdentifier": "app.podiumnotes.app",
       "appleTeamId": "6B2J525R6Q",
+      "entitlements": {
+        "com.apple.security.application-groups": [
+          "group.app.podiumnotes.app"
+        ]
+      },
       "infoPlist": {
         "CFBundleDocumentTypes": [
           {
