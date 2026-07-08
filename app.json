@@ -17,25 +17,35 @@
             "CFBundleTypeName": "Plain Text",
             "CFBundleTypeRole": "Viewer",
             "LSHandlerRank": "Alternate",
-            "LSItemContentTypes": ["public.plain-text", "public.text", "public.utf8-plain-text"]
+            "LSItemContentTypes": [
+              "public.plain-text",
+              "public.text",
+              "public.utf8-plain-text"
+            ]
           },
           {
             "CFBundleTypeName": "Markdown",
             "CFBundleTypeRole": "Viewer",
             "LSHandlerRank": "Alternate",
-            "LSItemContentTypes": ["net.daringfireball.markdown"]
+            "LSItemContentTypes": [
+              "net.daringfireball.markdown"
+            ]
           },
           {
             "CFBundleTypeName": "Rich Text",
             "CFBundleTypeRole": "Viewer",
             "LSHandlerRank": "Alternate",
-            "LSItemContentTypes": ["public.rtf"]
+            "LSItemContentTypes": [
+              "public.rtf"
+            ]
           },
           {
             "CFBundleTypeName": "Word Document",
             "CFBundleTypeRole": "Viewer",
             "LSHandlerRank": "Alternate",
-            "LSItemContentTypes": ["org.openxmlformats.wordprocessingml.document"]
+            "LSItemContentTypes": [
+              "org.openxmlformats.wordprocessingml.document"
+            ]
           }
         ],
         "UISupportsDocumentBrowser": false,
@@ -66,7 +76,10 @@
         {
           "iosActivationRules": {
             "NSExtensionActivationSupportsText": true,
-            "NSExtensionActivationSupportsWebURLWithMaxCount": 1
+            "NSExtensionActivationSupportsWebURLWithMaxCount": 5,
+            "NSExtensionActivationSupportsImageWithMaxCount": 20,
+            "NSExtensionActivationSupportsFileWithMaxCount": 20,
+            "NSExtensionActivationSupportsMovieWithMaxCount": 5
           }
         }
       ],
