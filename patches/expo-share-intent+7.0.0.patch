@@ -1,0 +1,76 @@
+diff --git a/node_modules/expo-share-intent/plugin/build/ios/ShareExtensionViewController.swift b/node_modules/expo-share-intent/plugin/build/ios/ShareExtensionViewController.swift
+index f1f4b72..2b5d1bc 100644
+--- a/node_modules/expo-share-intent/plugin/build/ios/ShareExtensionViewController.swift
++++ b/node_modules/expo-share-intent/plugin/build/ios/ShareExtensionViewController.swift
+@@ -489,25 +489,62 @@ class ShareViewController: UIViewController {
+     }
+   }
+ 
++  // PATCHED (Podium Notes): the stock implementation called application.open(url)
++  // (asynchronous) and then completeRequest() immediately in the same run-loop
++  // turn. That races the app switch against the share-session dismissal: the
++  // switch to the host app wins, the SOURCE app is backgrounded mid-handshake,
++  // and its share sheet never officially closes. Apple's apps clean up orphaned
++  // share sessions on return to foreground; third-party apps (Simplenote,
++  // Google Keep, ...) are left frozen until force-quit. Fix: sequence the two
++  // operations — completeRequest fires from open()'s completion handler, once
++  // the system has accepted the app switch — with a guarded fallback timer so
++  // the extension always completes even if the handler is never invoked.
++  private var didCompleteExtension = false
++
++  private func completeExtensionRequest() {
++    guard !didCompleteExtension else { return }
++    didCompleteExtension = true
++    extensionContext?.completeRequest(returningItems: [], completionHandler: nil)
++  }
++
+   private func redirectToHostApp(type: RedirectType) {
+     let nonce = UUID().uuidString
+     let url = URL(string: "\(shareProtocol)://dataUrl=\(sharedKey)?nonce=\(nonce)#\(type)")!
+     var responder = self as UIResponder?
++    var hostApplication: UIApplication? = nil
+ 
+     while responder != nil {
+       if let application = responder as? UIApplication {
+-        if application.canOpenURL(url) {
+-          application.open(url)
+-        } else {
+-          NSLog("redirectToHostApp canOpenURL KO: \(shareProtocol)")
+-          self.dismissWithError(
+-            message: "Application not found, invalid url scheme \(shareProtocol)")
+-          return
+-        }
++        hostApplication = application
++        break
+       }
+       responder = responder!.next
+     }
+-    extensionContext!.completeRequest(returningItems: [], completionHandler: nil)
++
++    guard let application = hostApplication else {
++      NSLog("redirectToHostApp could not resolve UIApplication via responder chain")
++      completeExtensionRequest()
++      return
++    }
++
++    guard application.canOpenURL(url) else {
++      NSLog("redirectToHostApp canOpenURL KO: \(shareProtocol)")
++      self.dismissWithError(
++        message: "Application not found, invalid url scheme \(shareProtocol)")
++      return
++    }
++
++    application.open(url, options: [:]) { [weak self] _ in
++      DispatchQueue.main.async {
++        self?.completeExtensionRequest()
++      }
++    }
++
++    // Fallback: never leave the share session open if the completion handler
++    // is swallowed (e.g. the extension is suspended during the app switch).
++    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
++      self?.completeExtensionRequest()
++    }
+   }
+ 
+   enum RedirectType {

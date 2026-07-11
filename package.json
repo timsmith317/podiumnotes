@@ -32,10 +32,12 @@
     "android": "expo run:android",
     "web": "expo start --web",
     "build:ios": "eas build --platform ios",
-    "build:preview": "eas build --platform ios --profile preview"
+    "build:preview": "eas build --platform ios --profile preview",
+    "postinstall": "patch-package"
   },
   "private": true,
   "devDependencies": {
+    "patch-package": "^8.0.1",
     "typescript": "~6.0.3"
   },
   "expo": {
