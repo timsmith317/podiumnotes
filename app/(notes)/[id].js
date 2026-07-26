@@ -16,6 +16,7 @@ import * as SpeechFollow from '../../modules/speech-follow';
 import { useSettings, themeColors, fontFamily } from '../../lib/useSettings';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
+import { readDocumentAsText } from '../../lib/importers';
 import * as Print from 'expo-print';
 import { ui, IS_TABLET } from '../../lib/scale';
 
@@ -292,11 +293,12 @@ export default function EditorScreen() {
         router.replace({ pathname: '/pdf-present', params: { uri: dest, name: pdfTitle, id: newId } });
         return;
       }
-      const text = await FileSystem.readAsStringAsync(asset.uri, {
-        encoding: FileSystem.EncodingType.UTF8,
-      });
+      // Format-aware reader: docx (unzip + extract), rtf (strip markup),
+      // else plain UTF-8. See lib/importers.js.
+      const text = await readDocumentAsText(asset);
       handleImport(text);
     } catch (e) {
+      console.warn('Import failed:', e);
       Alert.alert('Import failed', 'Could not read that file. Try plain text or markdown.');
     }
   }

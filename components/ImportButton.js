@@ -1,7 +1,7 @@
 // components/ImportButton.js
 import { TouchableOpacity, Text, StyleSheet, Alert } from 'react-native';
 import * as DocumentPicker from 'expo-document-picker';
-import * as FileSystem from 'expo-file-system';
+import { readDocumentAsText } from '../lib/importers';
 
 export default function ImportButton({ onImport, colors }) {
   async function handleImport() {
@@ -19,11 +19,12 @@ export default function ImportButton({ onImport, colors }) {
 
       if (result.canceled) return;
       const asset = result.assets[0];
-      const text = await FileSystem.readAsStringAsync(asset.uri, {
-        encoding: FileSystem.EncodingType.UTF8,
-      });
+      // Format-aware reader: docx (unzip + extract), rtf (strip markup),
+      // else plain UTF-8. See lib/importers.js.
+      const text = await readDocumentAsText(asset);
       onImport(text);
     } catch (e) {
+      console.warn('Import failed:', e);
       Alert.alert('Import failed', 'Could not read that file. Try saving as plain text or markdown first.');
     }
   }

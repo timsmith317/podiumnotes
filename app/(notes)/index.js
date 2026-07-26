@@ -13,6 +13,7 @@ import { useSettings, themeColors } from '../../lib/useSettings';
 import { ui, uic, uit } from '../../lib/scale';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
+import { readDocumentAsText } from '../../lib/importers';
 import { clearScroll } from '../../lib/scrollMemory';
 
 // Custom header height — match the editor's TOP_BAR_H idea so the popover
@@ -115,13 +116,14 @@ export default function NotesListScreen() {
         router.push({ pathname: '/pdf-present', params: { uri: dest, name: pdfTitle, id: newId } });
         return;
       }
-      const text = await FileSystem.readAsStringAsync(asset.uri, {
-        encoding: FileSystem.EncodingType.UTF8,
-      });
+      // Format-aware reader: docx (unzip + extract), rtf (strip markup),
+      // else plain UTF-8. See lib/importers.js.
+      const text = await readDocumentAsText(asset);
       const title = (asset.name || 'Imported').replace(/\.\w+$/i, '').slice(0, 60);
       const newId = createNote({ title, body: text });
       router.push(`/${newId}`);
     } catch (e) {
+      console.warn('Import failed:', e);
       Alert.alert('Import failed', 'Could not read that file. Try plain text or markdown.');
     }
   }
