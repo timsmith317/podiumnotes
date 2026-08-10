@@ -1,16 +1,47 @@
-// app/(notes)/[id].js
+// File: app/(notes)/[id].js → ~/Projects/podiumnotes/app/(notes)/[id].js
+//
+// ── UNIFIED PRESENTER + EDITOR ──
+// One screen, one ScrollView, one text layout, two modes.
+//
+// The old design kept two separate screens (presenter and editor) with
+// different fonts, paddings, and scroll state, and translated reading
+// position between them on every Edit. Every transition bug this screen
+// ever had — stale scroll, offset remapping drift, caret races, keyboard
+// reflow jumps — lived in that translation layer. This rewrite deletes the
+// layer instead of patching it:
+//
+//   • ONE layout: the presenter's font ladder (A−/A+) and padding apply to
+//     BOTH modes. The content container's padding is identical in present
+//     and edit, so the same scroll offset shows the same words in both.
+//     Toggling modes moves nothing — the band/HUD overlays disappear and a
+//     caret appears in the text that never moved.
+//   • ONE line map: the present-mode Text's onTextLayout feeds voice-follow
+//     AND the Edit caret placement. No cross-layout remapping exists.
+//   • Edit entry: menu → Edit places the caret at the START of the line
+//     sitting in the focus band — exactly where the reader was practicing.
+//   • Mode exits only via Back (or the keyboard-dismiss pill collapsing the
+//     keyboard WITHOUT leaving edit). Blur no longer flips modes, so
+//     tapping the hamburger mid-edit can't yank the screen out from under
+//     the user.
+//   • No KeyboardAvoidingView: its late padding reflow was the "jumped to
+//     the end" culprit. The ScrollView's native automaticallyAdjustKeyboardInsets
+//     handles the keyboard instead.
+//
+// PDF notes never reach this screen (routed to /pdf-present). The spell-check
+// review screen is unchanged and keeps its own compact reading size.
+
 import { useEffect, useState, useRef, useCallback } from 'react';
 import {
   View, Text, TextInput, ScrollView, TouchableOpacity, Pressable,
   StyleSheet, useWindowDimensions, useColorScheme, Keyboard, Alert,
-  KeyboardAvoidingView, Platform,
+  Platform,
 } from 'react-native';
 import { useLocalSearchParams, useNavigation, useRouter, useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useKeepAwake } from 'expo-keep-awake';
 import { SymbolView } from 'expo-symbols';
 import { useNotes } from '../../lib/useNotes';
-import { getScroll, getScrollSync, setScroll, clearScroll } from '../../lib/scrollMemory';
+import { getScrollSync, setScroll, clearScroll } from '../../lib/scrollMemory';
 import { check as spellCheck } from '../../modules/spell-check';
 import * as SpeechFollow from '../../modules/speech-follow';
 import { useSettings, themeColors, fontFamily } from '../../lib/useSettings';
@@ -20,15 +51,14 @@ import { readDocumentAsText } from '../../lib/importers';
 import * as Print from 'expo-print';
 import { ui, IS_TABLET } from '../../lib/scale';
 
-// Presenter font ladders — iPad gets a much taller ceiling for podium-distance reading
+// Font ladder — shared by present AND edit modes (one layout is the whole
+// point). iPad gets a taller ceiling for podium-distance reading.
 const FONT_SIZES_PHONE  = [18, 22, 26, 30, 36, 42];
 const FONT_SIZES_TABLET = [22, 28, 34, 42, 52, 64, 76];
-// Body uses the full screen width on both phone and tablet — a notes-reading
-// app benefits from edge-to-edge text. The list does the same.
 
 // Editorial serif for titles (system serif; no bundled font needed)
 const SERIF_FONT = Platform.OS === 'ios' ? 'Georgia' : 'serif';
-// Show the voice-follow control in the presenter HUD
+// Show the voice-follow control in the HUD
 const SHOW_VOICE_PLACEHOLDER = true;
 
 // ── Voice-follow tuning ──
@@ -41,14 +71,12 @@ const VOICE_MIN_RUN        = 3;   // contiguous matched words required to move
 const VOICE_MAX_JUMP_WORDS = 14;  // refuse to advance further than this in one step
 // Voice-tracking lead — how many text lines to place the matched word above
 // the band center, on the assumption that the user is already that many lines
-// past what iOS just transcribed. Different by device: iPad's larger text
-// means each line is a bigger absolute lift, and Speech Recognition latency
-// seems to differ too. Tune each device independently.
+// past what iOS just transcribed.
 const VOICE_LEAD_LINES_PHONE  = 2;
 const VOICE_LEAD_LINES_TABLET = 1;
 
 // Layout constants (heights below the safe-area inset)
-const TOP_BAR_H   = ui(38);   // Back / Present bar
+const TOP_BAR_H   = ui(38);   // Back / menu bar
 const TITLE_BAR_H = ui(36);   // fixed centered title strip
 
 export default function EditorScreen() {
@@ -64,54 +92,58 @@ export default function EditorScreen() {
   const colors = themeColors(settings.themeMode, colorScheme);
   const ff = fontFamily(settings.displayFont);
 
-  // iPad adaptation: bigger font ladder + a centered, width-capped text column.
   const FONT_SIZES = IS_TABLET ? FONT_SIZES_TABLET : FONT_SIZES_PHONE;
-  const bodyFont = IS_TABLET ? 30 : 26;
-  const bodyLH = bodyFont * 1.55;
-  const presPadX = 22;
-  const editPadX = 18;
+  // Review screen keeps its own compact reading size (it's a proofing view,
+  // not the podium view).
+  const reviewFont = IS_TABLET ? 30 : 26;
+  const reviewLH = reviewFont * 1.55;
+  const padX = 22;   // one horizontal padding for both modes
 
   const note = getNote(id);
   const [body, setBody] = useState(note?.body ?? '');
   const [title, setTitle] = useState(note?.title ?? '');
   const [ignoredWords, setIgnoredWords] = useState(note?.ignoredWords ?? []);
-  // Open directly in edit mode when navigated with ?edit=1 (swipe-right-to-edit
-  // from the list); otherwise open in presenter if the note has content.
-  const [presenting, setPresenting] = useState(!!note?.body && !startInEdit);
+  // ONE mode switch. Empty notes and ?edit=1 open in edit; notes with content
+  // open presenting.
+  const [editing, setEditing] = useState(startInEdit || !note?.body);
   const [reviewing, setReviewing] = useState(false);
   const [misspellings, setMisspellings] = useState([]);
   const [reviewIndex, setReviewIndex] = useState(0);   // current finding in the carousel
   const reviewScrollRef = useRef(null);
   const findingYRef = useRef({});                       // measured y-offset of each finding
-  const bodyLinesRef = useRef([]);                      // per-line layout from onTextLayout
-  const bodyOffsetYRef = useRef(0);                     // body Text's y within the scroll content
+  const bodyLinesRef = useRef([]);                      // review screen: per-line layout
+  const bodyOffsetYRef = useRef(0);                     // review screen: body Text's y offset
   const [fontIndex, setFontIndex] = useState(2);
-  const [editing, setEditing] = useState(startInEdit);
-  // When opening straight into edit mode (swipe-to-edit), start the caret at the
-  // very top. Without an explicit selection, a focused multiline TextInput with
-  // content defaults to caret-at-end / scrolled-to-bottom, which isn't the
-  // wanted default. (Tap-to-edit sets its own selection from the tap location.)
-  const [sel, setSel] = useState(startInEdit ? { start: 0, end: 0 } : null);
+  // Caret control. When opening straight into edit (swipe-to-edit / empty
+  // note), start the caret at the very top; entering from the presenter sets
+  // it to the band line. Without an explicit selection a focused multiline
+  // TextInput defaults to caret-at-end, which is never what we want.
+  const [sel, setSel] = useState(editing ? { start: 0, end: 0 } : null);
   const [keyboardVisible, setKeyboardVisible] = useState(false);
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   const [progress, setProgress] = useState(0);
   const [voiceOn, setVoiceOn] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const bodyInputRef = useRef(null);
-  const scrollRef = useRef(null);
-  const scrollYRef = useRef(0);
-  const linesRef = useRef([]);
-  const startedEmptyRef = useRef(!note?.body && !note?.title);
-  const latestRef = useRef({ title, body });
-  const presScrollRef = useRef(null);
-  const presScrollYRef = useRef(0);
+
+  // ── The single scroll world ──
+  const scrollRef = useRef(null);        // the one ScrollView
+  const scrollYRef = useRef(0);          // its current offset
+  const linesRef = useRef([]);           // raw onTextLayout lines (present-mode Text)
+  const lineStartsRef = useRef([]);      // per-line char ranges + y (the one line map)
+  const viewportHRef = useRef(0);
+  const contentHRef = useRef(0);
   const restoredScrollRef = useRef(false);
   const saveScrollTimer = useRef(null);
-  const presViewportH = useRef(0);
-  const presContentH = useRef(0);
   const progressPctRef = useRef(0);
-  const presLinesRef = useRef([]);
-  const lineStartsRef = useRef([]);
+  // Pin insurance across the Text ↔ TextInput swap. Content geometry is
+  // identical across the swap (same style, same padding), so this should be
+  // a no-op — it exists to absorb any residual native offset churn. Cancelled
+  // instantly by user drag.
+  const editPinYRef = useRef(null);
+
+  const startedEmptyRef = useRef(!note?.body && !note?.title);
+  const latestRef = useRef({ title, body });
   const scriptWordsRef = useRef([]);
   const cursorWordRef = useRef(0);
   const lastScrollLineRef = useRef(-1);
@@ -124,34 +156,23 @@ export default function EditorScreen() {
   }, []);
 
   useEffect(() => {
-    getScroll(id).then(y => {
-      if (y > 0 && !restoredScrollRef.current) {
-        restoredScrollRef.current = true;
-        requestAnimationFrame(() => presScrollRef.current?.scrollTo({ y, animated: false }));
-      }
-    });
-  }, []);
-
-  useEffect(() => {
     return () => { try { SpeechFollow.stop(); } catch (e) {} };
   }, []);
 
+  // Voice-follow is a present-mode feature; entering edit stops it.
   useEffect(() => {
-    if (!presenting && voiceOn) stopVoice();
-  }, [presenting]);
+    if (editing && voiceOn) stopVoice();
+  }, [editing]);
 
-  // Defensive: when the menu opens in present mode, iOS's UIScrollView can
-  // snap to y=0 as a side effect of the absolute-positioned menu overlays
-  // being added to the ScrollView's parent (a native re-layout side effect
-  // that isn't triggered by our JS code path). Restore the scroll position
-  // to whatever the user was reading on the next frame — before iOS commits
-  // the reset visually — so the reader stays put across menu toggles.
+  // Defensive: when the menu opens, iOS's UIScrollView can snap to y=0 as a
+  // side effect of the absolute-positioned menu overlays being added to the
+  // ScrollView's parent. Restore the scroll position on the next frame.
   useEffect(() => {
-    if (!menuOpen || !presenting) return;
-    const y = presScrollYRef.current;
+    if (!menuOpen) return;
+    const y = scrollYRef.current;
     if (y <= 0) return;
-    requestAnimationFrame(() => presScrollRef.current?.scrollTo({ y, animated: false }));
-  }, [menuOpen, presenting]);
+    requestAnimationFrame(() => scrollRef.current?.scrollTo({ y, animated: false }));
+  }, [menuOpen]);
 
   useFocusEffect(
     useCallback(() => {
@@ -179,7 +200,7 @@ export default function EditorScreen() {
         deleteNote(id);
         clearScroll(id);
       } else {
-        setScroll(id, presScrollYRef.current);
+        setScroll(id, scrollYRef.current);
         // Commit the LATEST content to local first, THEN flush to cloud. The
         // autosave effect's cleanup cancels its pending 400ms save on unmount,
         // so the final keystrokes may not be in the store yet — write them now
@@ -193,25 +214,35 @@ export default function EditorScreen() {
     };
   }, []);
 
-  function handleDismissKeyboard() {
+  // Collapse the keyboard WITHOUT leaving edit mode. Exiting edit is Back's
+  // job only — blur must never flip modes (that was the source of the
+  // "hamburger tap yanked me out of edit" class of bugs).
+  function collapseKeyboard() {
     bodyInputRef.current?.blur();
     Keyboard.dismiss();
-    setEditing(false);
   }
 
   // On entering edit mode, release the controlled selection after a short
-  // delay so the user can move the caret freely. iOS auto-scrolls to make
-  // the caret visible on focus — which is what we want, since the caret is
-  // placed at the tap location via the `selection` prop. Previously this
-  // effect also fired multiple scrollTo calls to "hold" the reading position
-  // (guarding against a bug where a focused tall TextInput jumped to the
-  // end), but that fought user scrolling within ~400ms of tapping to edit
-  // and also caused a snap-to-top on hamburger tap (blur → render switch).
-  // The `selection` prop already prevents the jump-to-end.
+  // delay so the user can move the caret freely. iOS places the caret from
+  // the `selection` prop on focus; after that the native input owns it.
   useEffect(() => {
     if (!editing) return;
     const tc = setTimeout(() => setSel(null), 350);
     return () => clearTimeout(tc);
+  }, [editing]);
+
+  // Pin insurance across the mode swap (see editPinYRef).
+  useEffect(() => {
+    if (editPinYRef.current == null) return;
+    const y = editPinYRef.current;
+    const pin = () => {
+      if (editPinYRef.current == null) return;
+      scrollRef.current?.scrollTo({ y, animated: false });
+    };
+    const raf = requestAnimationFrame(pin);
+    const timers = [80, 200].map(ms => setTimeout(pin, ms));
+    const done = setTimeout(() => { editPinYRef.current = null; }, 260);
+    return () => { cancelAnimationFrame(raf); timers.forEach(clearTimeout); clearTimeout(done); };
   }, [editing]);
 
   useEffect(() => {
@@ -228,38 +259,6 @@ export default function EditorScreen() {
 
   function handleImport(text) {
     setBody(prev => (prev ? prev + '\n\n' + text : text));
-  }
-
-  // Map a tap on the read-mode text to a character offset, using the line
-  // layout from onTextLayout (horizontal position is proportional/approx).
-  function offsetFromTap(locationX, locationY) {
-    const lines = linesRef.current;
-    if (!lines || !lines.length) return body.length;
-    let li = lines.findIndex(l => locationY >= l.y && locationY <= l.y + l.height);
-    if (li === -1) li = locationY < lines[0].y ? 0 : lines.length - 1;
-    const line = lines[li];
-    const lt = line.text || '';
-    const frac = line.width > 0
-      ? Math.min(Math.max((locationX - line.x) / line.width, 0), 1)
-      : 0;
-    const charInLine = Math.round(frac * lt.length);
-    let pos = 0;
-    for (let i = 0; i < li; i++) {
-      const t = lines[i].text || '';
-      const found = body.indexOf(t, pos);
-      pos = found === -1 ? pos + t.length : found + t.length;
-      if (body[pos] === '\n') pos += 1;
-    }
-    const foundLine = body.indexOf(lt, pos);
-    const lineStart = foundLine === -1 ? pos : foundLine;
-    return Math.min(lineStart + charInLine, body.length);
-  }
-
-  function handleBodyTap(e) {
-    const { locationX, locationY } = e.nativeEvent;
-    const off = offsetFromTap(locationX, locationY);
-    setSel({ start: off, end: off });
-    setEditing(true);
   }
 
   async function handlePickImport() {
@@ -303,21 +302,31 @@ export default function EditorScreen() {
     }
   }
 
-  // Clearance the floating HUD needs at the bottom of the scroll + band area.
+  // ── Shared geometry (both modes) ──
   const hudClear = insets.bottom + ui(76);
   const pillW = Math.min(width - ui(120), 340);
   const progressColor = (settings.bandColor && settings.bandColor !== 'clear')
     ? settings.bandColor : colors.accent;
 
-  // Band geometry (presenter) — content begins below top bar + title strip
   const lineHeight = FONT_SIZES[fontIndex] * 1.55;
   const bandHeight = settings.bandLines * lineHeight;
-  const presenterContentTop = insets.top + TOP_BAR_H + TITLE_BAR_H;
+  const contentTop = insets.top + TOP_BAR_H + TITLE_BAR_H;
   const bandTop = height * (settings.bandPositionPct / 100) - bandHeight / 2;
   const clampedBandTop = Math.max(
-    presenterContentTop + 8,
+    contentTop + 8,
     Math.min(bandTop, height - bandHeight - hudClear - 8)
   );
+
+  // The content container padding — IDENTICAL in both modes, keyed to the
+  // band geometry. This is the invariant that makes mode toggling free: the
+  // same scroll offset shows the same words whether the band is visible or
+  // the caret is.
+  const contentPadding = {
+    paddingTop: clampedBandTop - contentTop,
+    paddingBottom: height - clampedBandTop - bandHeight + hudClear + 8,
+    paddingLeft: insets.left + padX,
+    paddingRight: insets.right + padX,
+  };
 
   function bandFillColor(hex) {
     if (hex === 'clear') return 'transparent';
@@ -344,8 +353,9 @@ export default function EditorScreen() {
   }
 
   // Map each laid-out visual line to its character range + y position.
+  // This is THE line map — voice-follow and Edit-entry both read it.
   function computeLineStarts() {
-    const lines = presLinesRef.current || [];
+    const lines = linesRef.current || [];
     const ls = []; let pos = 0;
     for (const ln of lines) {
       const t = ln.text || '';
@@ -357,21 +367,26 @@ export default function EditorScreen() {
     lineStartsRef.current = ls;
   }
 
-  // Find the script-word index that matches wherever the reader is currently
-  // scrolled, so voice-follow starts from the band — not the top of the note.
-  // We anchor to the *top* of the focus band: the reader is always at or below
-  // that, so the forward matcher can catch them. A line sits at the band's top
-  // when its text-relative y equals the scroll offset (the presenter's padding
-  // and the band's screen position cancel out, same as in scrollToOffset).
-  function cursorFromScroll() {
+  // The line currently sitting at the top of the focus band. A line sits at
+  // the band's top when its text-relative y equals the scroll offset (the
+  // content padding and the band's screen position cancel out).
+  function bandLine() {
     const ls = lineStartsRef.current;
-    const words = scriptWordsRef.current;
-    if (!ls.length || !words.length) return 0;
-    const targetY = presScrollYRef.current;
+    if (!ls.length) return null;
+    const targetY = scrollYRef.current;
     let line = ls.find(l => targetY >= l.y && targetY <= l.y + l.h);
     if (!line) {
       line = ls.reduce((a, b) => (Math.abs(b.y - targetY) < Math.abs(a.y - targetY) ? b : a), ls[0]);
     }
+    return line;
+  }
+
+  // Find the script-word index that matches wherever the reader is currently
+  // scrolled, so voice-follow starts from the band — not the top of the note.
+  function cursorFromScroll() {
+    const line = bandLine();
+    const words = scriptWordsRef.current;
+    if (!line || !words.length) return 0;
     let idx = words.findIndex(w => w.offset >= line.start);
     if (idx === -1) idx = words.length - 1;
     return Math.max(0, idx);
@@ -380,13 +395,10 @@ export default function EditorScreen() {
   // Scroll so the matched line sits in the focus band.
   //
   // The centering term (line.y + h/2 - bandHeight/2) is correct on its own:
-  // the content padding the presenter adds and the band's screen position
-  // cancel out, so a plain center lands the matched word in the band's middle.
-  // But the matched word is the one you *just* spoke — by the time iOS
-  // transcribes it and we scroll, you're already a beat further on. Centering
-  // that already-spoken word leaves what you're saying *now* below the band.
-  // VOICE_LEAD_LINES_* lifts the matched word above center so your live spot
-  // rides inside the band instead of trailing under it.
+  // the content padding and the band's screen position cancel out. But the
+  // matched word is the one you *just* spoke — VOICE_LEAD_LINES_* lifts the
+  // matched word above center so your live spot rides inside the band
+  // instead of trailing under it.
   function scrollToOffset(offset) {
     const ls = lineStartsRef.current;
     if (!ls.length) return;
@@ -396,20 +408,14 @@ export default function EditorScreen() {
     const leadLines = IS_TABLET ? VOICE_LEAD_LINES_TABLET : VOICE_LEAD_LINES_PHONE;
     const lead = leadLines * (line.h || 0);
     const target = Math.max(0, line.y + line.h / 2 - bandHeight / 2 + lead);
-    presScrollRef.current?.scrollTo({ y: target, animated: true });
+    scrollRef.current?.scrollTo({ y: target, animated: true });
   }
 
   // Matcher. Aligns the *latest* spoken words to a nearby forward spot in the
-  // script. Three changes from the first pass, each targeting the "jumps way
-  // down the page" failure:
-  //   • contiguous run only — scattered single-word hits no longer count, so a
-  //     stray "of" / "the" can't anchor a match far ahead;
-  //   • short forward window + nearest-wins tie-break — favours the spot just
-  //     ahead of you over an identical phrase deeper in the script;
-  //   • hard jump cap — if the only confident match is too far ahead, we HOLD
-  //     rather than lurch. Losing a beat beats losing your place.
-  // The inner loop counts how many trailing recent words match ending at j, so
-  // leading mis-hears ("um", dropped words) don't break an otherwise good tail.
+  // script:
+  //   • contiguous run only — scattered single-word hits don't count;
+  //   • short forward window + nearest-wins tie-break;
+  //   • hard jump cap — if the only confident match is too far ahead, HOLD.
   function handleTranscript(text) {
     const tw = (text.toLowerCase().match(/[a-z0-9']+/g)) || [];
     if (tw.length === 0) return;
@@ -473,51 +479,52 @@ export default function EditorScreen() {
     if (voiceOn) stopVoice(); else startVoice();
   }
 
-  // Top / bottom jumps used by the menu arrows in both presenter and editor.
-  // Both use animated:false — an animated scrollTo over a long note stutters
-  // and tapping again mid-animation feels like the scroll is moving "a page
-  // at a time". Instant jumps are crisp and unambiguous.
-  //
-  // Presenter and editor each have their own ScrollView ref, so the helpers
-  // route by mode: presenting -> presScrollRef, otherwise -> scrollRef.
-  // jumpToBottom in present mode lands the last line in the focus band (the
-  // contentContainer has tall paddingBottom so scrollToEnd would leave the
-  // line floating high above the band in whitespace); the editor has no band,
-  // so scrollToEnd is correct there.
+  // ── Mode transitions ──
+  // Enter edit with the caret at the START of the line in the focus band.
+  // No scroll change: the text doesn't move between modes, so the band line
+  // is already exactly where the user is looking.
+  function enterEdit() {
+    const line = bandLine();
+    const start = line ? line.start : 0;
+    if (__DEV__) console.log('[unified] enterEdit: scrollY', Math.round(scrollYRef.current), '→ caret', start);
+    editPinYRef.current = scrollYRef.current;
+    setSel({ start, end: start });
+    setEditing(true);
+  }
+
+  // Back to presenting — same position, band reappears over the caret line.
+  function exitEdit() {
+    collapseKeyboard();
+    editPinYRef.current = scrollYRef.current;
+    setEditing(false);
+  }
+
+  // Top / bottom jumps used by the menu arrows. animated:false — an animated
+  // scrollTo over a long note stutters. jumpToBottom lands the last line in
+  // the band region (the contentContainer's tall paddingBottom means
+  // scrollToEnd would leave the last line floating high in whitespace).
   function jumpToTop() {
     lastScrollLineRef.current = -1;
-    const ref = presenting ? presScrollRef : scrollRef;
-    ref.current?.scrollTo({ y: 0, animated: false });
+    scrollRef.current?.scrollTo({ y: 0, animated: false });
   }
   function jumpToBottom() {
     lastScrollLineRef.current = -1;
-    if (presenting) {
-      const ls = lineStartsRef.current;
-      if (!ls.length) {
-        presScrollRef.current?.scrollToEnd({ animated: false });
-        return;
-      }
-      const last = ls[ls.length - 1];
-      const target = Math.max(0, last.y + last.h / 2 - bandHeight / 2);
-      presScrollRef.current?.scrollTo({ y: target, animated: false });
-    } else {
+    const ls = lineStartsRef.current;
+    if (!ls.length) {
       scrollRef.current?.scrollToEnd({ animated: false });
+      return;
     }
+    const last = ls[ls.length - 1];
+    const target = Math.max(0, last.y + last.h / 2 - bandHeight / 2);
+    scrollRef.current?.scrollTo({ y: target, animated: false });
   }
 
-  // Home — pop everything back to the note list, regardless of how deep we
-  // are. popToTop is React Navigation's "go to the first screen of this
-  // stack"; since the (notes) layout has index as its first screen, this
-  // lands the user on the list with a clean history.
+  // Home — pop everything back to the note list.
   function jumpHome() {
     navigation.popToTop();
   }
 
-  // Popover menu — shared between presenter and editor. Each caller passes
-  // an items array; ordering in the array is ordering on screen. Each item:
-  // { label: string, icon: SF Symbol name, onPress: () => void }.
-  // The wrapping Pressable (no-op onPress) on the positioner stops taps on
-  // separators or card padding from bubbling up to the dismiss backdrop.
+  // Popover menu — items array; ordering in the array is ordering on screen.
   function renderMenu(items) {
     if (!menuOpen) return null;
     return (
@@ -563,16 +570,12 @@ export default function EditorScreen() {
   }
 
   // Print via the native iOS print sheet (AirPrint, Save to PDF, etc.).
-  // Renders a clean, paper-optimized layout — always light/serif regardless of
-  // the app's screen theme, since print is for paper, not the screen. Escapes
-  // the note text so any stray HTML characters render literally.
   async function handlePrint() {
     setMenuOpen(false);
     const esc = (s) => String(s || '')
       .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     const t = (latestRef.current.title || title || 'Untitled').trim();
     const b = latestRef.current.body || body || '';
-    // Preserve paragraph breaks: split on blank lines → <p>, single newlines → <br>.
     const paras = esc(b).split(/\n{2,}/).map(
       p => `<p>${p.replace(/\n/g, '<br>')}</p>`
     ).join('');
@@ -596,11 +599,11 @@ export default function EditorScreen() {
     try {
       await Print.printAsync({ html });
     } catch (e) {
-      // User cancelling the print sheet throws; ignore. Real errors are rare.
+      // User cancelling the print sheet throws; ignore.
     }
   }
 
-  // True if a finding's word is on this note's ignore list (case-insensitive).
+  // ── Spell check ──
   function isIgnored(word, ignoreList) {
     const list = ignoreList ?? ignoredWords;
     const w = (word || '').toLowerCase();
@@ -608,7 +611,7 @@ export default function EditorScreen() {
   }
 
   function handleCheck() {
-    handleDismissKeyboard();
+    collapseKeyboard();
     let found = [];
     try {
       if (Platform.OS === 'ios') {
@@ -624,8 +627,6 @@ export default function EditorScreen() {
     setReviewing(true);
   }
 
-  // Re-scan both fields after an edit, keeping field tags and honoring the
-  // per-note ignore list. Returns the combined, filtered list.
   function rescanBoth(nextTitle, nextBody, ignoreList) {
     try {
       if (Platform.OS !== 'ios') return [];
@@ -635,7 +636,6 @@ export default function EditorScreen() {
     } catch (e) { return []; }
   }
 
-  // Move to the next finding, or finish if we're at the end.
   function advanceReview(fromIndex, list) {
     const remaining = list ?? misspellings;
     if (fromIndex + 1 >= remaining.length) {
@@ -646,7 +646,6 @@ export default function EditorScreen() {
     }
   }
 
-  // Apply a suggestion to the current finding, re-scan both fields, and advance.
   function applySuggestion(suggestion) {
     const m = misspellings[reviewIndex];
     if (!m) return;
@@ -669,13 +668,10 @@ export default function EditorScreen() {
     setReviewIndex(Math.min(reviewIndex, refound.length - 1));
   }
 
-  // Skip: leave this word as-is, flag it again next time. Just advance.
   function skipCurrent() {
     advanceReview(reviewIndex);
   }
 
-  // Ignore: accept this word in THIS note forever. Add to the per-note ignore
-  // list (persisted on the note), drop all its occurrences from the findings.
   function ignoreCurrent() {
     const m = misspellings[reviewIndex];
     if (!m) { advanceReview(reviewIndex); return; }
@@ -754,159 +750,7 @@ export default function EditorScreen() {
     return segs;
   }
 
-  // ── PRESENT MODE ──
-  if (presenting) {
-    return (
-      <View style={[styles.flex, { backgroundColor: colors.bg }]}>
-
-        {/* Top bar — Back | ▲ Settings ▼ | Edit ›
-            Side slots are flex:1 spacers; only the inner buttons receive
-            touches. Just Back on the left and a hamburger on the right —
-            Settings, Edit, and the top/bottom jumps live in the popover. */}
-        <View style={[styles.topBar, { paddingTop: Math.max(insets.top, ui(8)), paddingLeft: insets.left + ui(16), paddingRight: insets.right + ui(16), backgroundColor: colors.bg, borderBottomColor: colors.border }]}>
-          <View style={styles.topBarSideStart}>
-            <TouchableOpacity
-              style={styles.topBarBackInner}
-              onPress={() => router.back()}
-              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-            >
-              <Text style={[styles.topBarChevron, { color: colors.text }]}>‹</Text>
-              <Text style={[styles.topBarText, { color: colors.text }]}> Back</Text>
-            </TouchableOpacity>
-          </View>
-          <View style={styles.topBarSideEnd}>
-            <TouchableOpacity
-              style={styles.hamburgerBtn}
-              onPress={() => setMenuOpen(prev => !prev)}
-              activeOpacity={1}
-              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-            >
-              <View style={styles.hamburgerIcon}>
-                <View style={[styles.hamburgerLine, { backgroundColor: colors.text }]} />
-                <View style={[styles.hamburgerLine, { backgroundColor: colors.text }]} />
-                <View style={[styles.hamburgerLine, { backgroundColor: colors.text }]} />
-              </View>
-            </TouchableOpacity>
-          </View>
-        </View>
-
-        {/* Fixed centered title strip */}
-        <View style={[styles.titleBar, { borderBottomColor: colors.border }]}>
-          <Text style={[styles.titleText, { color: colors.text, fontFamily: ff }]} numberOfLines={1}>
-            {title || 'Untitled'}
-          </Text>
-        </View>
-
-        {/* Band overlay */}
-        <View pointerEvents="none" style={[styles.band, {
-          top: clampedBandTop, height: bandHeight,
-          backgroundColor: bandFillColor(settings.bandColor),
-          borderColor: bandBorderColor(settings.bandColor),
-        }]} />
-        {settings.bandFades && (
-          <>
-            <View pointerEvents="none" style={[styles.fade, { top: clampedBandTop - 48, height: 48, backgroundColor: colors.bg + 'CC' }]} />
-            <View pointerEvents="none" style={[styles.fade, { top: clampedBandTop + bandHeight, height: 48, backgroundColor: colors.bg + 'CC' }]} />
-          </>
-        )}
-
-        <ScrollView
-          ref={presScrollRef}
-          style={styles.flex}
-          contentContainerStyle={{
-            paddingTop: clampedBandTop - presenterContentTop,
-            paddingBottom: height - clampedBandTop - bandHeight + hudClear + 8,
-            paddingLeft: insets.left + presPadX,
-            paddingRight: insets.right + presPadX,
-          }}
-          showsVerticalScrollIndicator={false}
-          scrollEventThrottle={16}
-          scrollsToTop={false}
-          onLayout={e => { presViewportH.current = e.nativeEvent.layout.height; }}
-          onContentSizeChange={(w, h) => {
-            presContentH.current = h;
-            if (!restoredScrollRef.current) {
-              restoredScrollRef.current = true;
-              const y = getScrollSync(id);
-              if (y > 0) presScrollRef.current?.scrollTo({ y: Math.min(y, Math.max(0, h)), animated: false });
-            }
-          }}
-          onScroll={e => {
-            const y = e.nativeEvent.contentOffset.y;
-            presScrollYRef.current = y;
-            const denom = Math.max(1, presContentH.current - presViewportH.current);
-            const pct = Math.min(100, Math.max(0, Math.round((y / denom) * 100)));
-            if (pct !== progressPctRef.current) { progressPctRef.current = pct; setProgress(pct); }
-            if (saveScrollTimer.current) clearTimeout(saveScrollTimer.current);
-            saveScrollTimer.current = setTimeout(() => setScroll(id, y), 400);
-          }}
-        >
-          <Text
-            onTextLayout={e => { presLinesRef.current = e.nativeEvent.lines; computeLineStarts(); }}
-            style={[styles.presenterText, {
-              fontSize: FONT_SIZES[fontIndex], lineHeight,
-              color: colors.text, fontFamily: ff,
-            }]}>
-            {body}
-          </Text>
-        </ScrollView>
-
-        {/* Floating control HUD — A− · progress · A+, with voice-follow alongside */}
-        <View pointerEvents="box-none" style={[styles.hudWrap, { bottom: insets.bottom + ui(12) }]}>
-          <View style={[styles.hudPill, { width: pillW, backgroundColor: colors.surface, borderColor: colors.border }]}>
-            <TouchableOpacity
-              onPress={() => setFontIndex(i => Math.max(0, i - 1))}
-              disabled={fontIndex === 0}
-              hitSlop={{ top: 10, bottom: 10, left: 6, right: 6 }}
-              style={{ opacity: fontIndex === 0 ? 0.3 : 1 }}
-            >
-              <Text style={[styles.hudAa, { color: colors.text }]}>A−</Text>
-            </TouchableOpacity>
-            <View style={[styles.hudTrack, { backgroundColor: colors.border }]}>
-              <View style={[styles.hudFill, { width: `${progress}%`, backgroundColor: progressColor }]} />
-            </View>
-            <TouchableOpacity
-              onPress={() => setFontIndex(i => Math.min(FONT_SIZES.length - 1, i + 1))}
-              disabled={fontIndex === FONT_SIZES.length - 1}
-              hitSlop={{ top: 10, bottom: 10, left: 6, right: 6 }}
-              style={{ opacity: fontIndex === FONT_SIZES.length - 1 ? 0.3 : 1 }}
-            >
-              <Text style={[styles.hudAa, { color: colors.text }]}>A+</Text>
-            </TouchableOpacity>
-          </View>
-          {SHOW_VOICE_PLACEHOLDER && (
-            <TouchableOpacity
-              style={[styles.hudMic, {
-                backgroundColor: voiceOn ? colors.accent : colors.surface,
-                borderColor: voiceOn ? colors.accentBorder : colors.border,
-              }]}
-              onPress={toggleVoice}
-              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-            >
-              <SymbolView
-                name={voiceOn ? 'mic.fill' : 'mic'}
-                size={ui(22)}
-                tintColor={voiceOn ? colors.accentText : colors.textMuted}
-                type="monochrome"
-              />
-            </TouchableOpacity>
-          )}
-        </View>
-
-        {/* Popover menu — anchored under the hamburger. */}
-        {renderMenu([
-          { label: 'Go to top',    icon: 'arrow.up',           onPress: jumpToTop },
-          { label: 'Go to bottom', icon: 'arrow.down',         onPress: jumpToBottom },
-          { label: 'Edit',         icon: 'square.and.pencil',  onPress: () => setPresenting(false) },
-          { label: 'Print',        icon: 'printer',            onPress: handlePrint },
-          { label: 'Home',         icon: 'house',              onPress: jumpHome },
-          { label: 'Settings',     icon: 'gearshape',          onPress: () => router.push('/settings') },
-        ])}
-      </View>
-    );
-  }
-
-  // ── REVIEW (spell check) MODE ──
+  // ── REVIEW (spell check) MODE — unchanged proofing screen ──
   if (reviewing) {
     const current = misspellings[reviewIndex];
     const suggestions = (current?.suggestions || []).slice(0, 3);
@@ -933,21 +777,19 @@ export default function EditorScreen() {
         <ScrollView
           ref={reviewScrollRef}
           style={styles.flex}
-          contentContainerStyle={[styles.bodyContent, { paddingLeft: insets.left + editPadX, paddingRight: insets.right + editPadX, paddingBottom: ui(24) }]}
+          contentContainerStyle={[styles.reviewContent, { paddingLeft: insets.left + 18, paddingRight: insets.right + 18, paddingBottom: ui(24) }]}
           showsVerticalScrollIndicator={true}
         >
-          {/* Title — highlighted if the current finding is in the title */}
           {!!title && (
-            <Text style={{ color: colors.text, fontFamily: ff, fontSize: bodyFont * 1.3, fontWeight: '700', marginBottom: ui(12) }}>
+            <Text style={{ color: colors.text, fontFamily: ff, fontSize: reviewFont * 1.3, fontWeight: '700', marginBottom: ui(12) }}>
               {renderReviewTitleSegments()}
             </Text>
           )}
           <Text
-            style={{ color: colors.text, fontFamily: ff, fontSize: bodyFont, lineHeight: bodyLH }}
+            style={{ color: colors.text, fontFamily: ff, fontSize: reviewFont, lineHeight: reviewLH }}
             onTextLayout={(e) => {
               const raw = e.nativeEvent.lines || [];
               bodyLinesRef.current = raw.map(l => ({ y: l.y, text: l.text }));
-              // First layout: scroll to the current finding once lines are known.
               const m = misspellings[reviewIndex];
               if (m && m.field === 'body') {
                 let acc = 0, targetY = 0;
@@ -1016,34 +858,54 @@ export default function EditorScreen() {
     );
   }
 
-  // ── EDIT MODE ──
-  const bodyTextStyle = {
+  // ── THE UNIFIED SCREEN ──
+  const isEmpty = !body;
+  const bodyStyle = {
     color: colors.text,
     fontFamily: ff,
-    fontSize: bodyFont,
-    lineHeight: bodyLH,
+    fontSize: FONT_SIZES[fontIndex],
+    lineHeight,
+    fontWeight: '400',
   };
-  const isEmpty = !body;
+
+  const menuItems = editing
+    ? [
+        { label: 'Go to top',    icon: 'arrow.up',          onPress: jumpToTop },
+        { label: 'Go to bottom', icon: 'arrow.down',        onPress: jumpToBottom },
+        ...(isEmpty
+          ? [{ label: 'Import',         icon: 'square.and.arrow.down', onPress: handlePickImport }]
+          : [{ label: 'Check spelling', icon: 'checkmark.circle',      onPress: handleCheck }]
+        ),
+        ...(isEmpty ? [] : [{ label: 'Print', icon: 'printer', onPress: handlePrint }]),
+        { label: 'Home',     icon: 'house',     onPress: jumpHome },
+        { label: 'Settings', icon: 'gearshape', onPress: () => router.push('/settings') },
+      ]
+    : [
+        { label: 'Go to top',    icon: 'arrow.up',           onPress: jumpToTop },
+        { label: 'Go to bottom', icon: 'arrow.down',         onPress: jumpToBottom },
+        { label: 'Edit',         icon: 'square.and.pencil',  onPress: enterEdit },
+        { label: 'Print',        icon: 'printer',            onPress: handlePrint },
+        { label: 'Home',         icon: 'house',              onPress: jumpHome },
+        { label: 'Settings',     icon: 'gearshape',          onPress: () => router.push('/settings') },
+      ];
 
   return (
     <View style={[styles.flex, { backgroundColor: colors.bg }]}>
-    <KeyboardAvoidingView
-      style={styles.flex}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      keyboardVerticalOffset={0}
-    >
 
-      {/* Top bar — Back | (empty) | Hamburger
-          Import (when empty) and Check spelling (when content) both live in
-          the menu now, so the bar stays uniform between empty and authored
-          notes. Center stays in place as a layout balancer. */}
+      {/* Top bar — Back | (spacer) | Hamburger. Back's meaning is modal:
+          editing → return to presenting (or leave, if the note is empty);
+          presenting → leave the note. */}
       <View style={[styles.topBar, { paddingTop: Math.max(insets.top, ui(8)), paddingLeft: insets.left + ui(16), paddingRight: insets.right + ui(16), backgroundColor: colors.bg, borderBottomColor: colors.border }]}>
         <View style={styles.topBarSideStart}>
           <TouchableOpacity
             style={styles.topBarBackInner}
             onPress={() => {
-              handleDismissKeyboard();
-              if (body.trim()) { setPresenting(true); } else { router.back(); }
+              if (editing) {
+                if (body.trim()) exitEdit();
+                else { collapseKeyboard(); router.back(); }
+              } else {
+                router.back();
+              }
             }}
             hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
           >
@@ -1068,41 +930,84 @@ export default function EditorScreen() {
         </View>
       </View>
 
-      {/* Fixed centered title strip — editable */}
+      {/* Fixed centered title strip — Text presenting, TextInput editing.
+          Same bar height in both, so nothing below it moves. */}
       <View style={[styles.titleBar, { borderBottomColor: colors.border }]}>
-        <TextInput
-          style={[styles.titleText, { color: colors.text, fontFamily: ff }]}
-          value={title}
-          onChangeText={setTitle}
-          placeholder="Title"
-          placeholderTextColor={colors.placeholder}
-          textAlign="center"
-          returnKeyType="done"
-          multiline={false}
-          spellCheck={false}
-          autoCorrect={false}
-        />
+        {editing ? (
+          <TextInput
+            style={[styles.titleText, { color: colors.text, fontFamily: ff }]}
+            value={title}
+            onChangeText={setTitle}
+            placeholder="Title"
+            placeholderTextColor={colors.placeholder}
+            textAlign="center"
+            returnKeyType="done"
+            multiline={false}
+            spellCheck={false}
+            autoCorrect={false}
+          />
+        ) : (
+          <Text style={[styles.titleText, { color: colors.text, fontFamily: ff }]} numberOfLines={1}>
+            {title || 'Untitled'}
+          </Text>
+        )}
       </View>
 
-      {/* Body — read mode (Text) scrolls full-screen, no keyboard. Tap to edit:
-          the tap is hit-tested to place the caret at the character you touched. */}
+      {/* Band overlay + fades — present mode only. Absolute overlays: their
+          presence/absence never affects the text layout underneath. */}
+      {!editing && (
+        <>
+          <View pointerEvents="none" style={[styles.band, {
+            top: clampedBandTop, height: bandHeight,
+            backgroundColor: bandFillColor(settings.bandColor),
+            borderColor: bandBorderColor(settings.bandColor),
+          }]} />
+          {settings.bandFades && (
+            <>
+              <View pointerEvents="none" style={[styles.fade, { top: clampedBandTop - 48, height: 48, backgroundColor: colors.bg + 'CC' }]} />
+              <View pointerEvents="none" style={[styles.fade, { top: clampedBandTop + bandHeight, height: 48, backgroundColor: colors.bg + 'CC' }]} />
+            </>
+          )}
+        </>
+      )}
+
+      {/* THE ScrollView — same content padding in both modes. */}
       <ScrollView
         ref={scrollRef}
         style={styles.flex}
-        contentContainerStyle={[styles.bodyContent, { paddingLeft: insets.left + editPadX, paddingRight: insets.right + editPadX, paddingBottom: insets.bottom + 24 }]}
+        contentContainerStyle={contentPadding}
+        showsVerticalScrollIndicator={editing}
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode="interactive"
+        automaticallyAdjustKeyboardInsets={editing}
         scrollEventThrottle={16}
         scrollsToTop={false}
-        onScroll={e => { scrollYRef.current = e.nativeEvent.contentOffset.y; }}
-        showsVerticalScrollIndicator={true}
+        onLayout={e => { viewportHRef.current = e.nativeEvent.layout.height; }}
+        onContentSizeChange={(w, h) => {
+          contentHRef.current = h;
+          if (!restoredScrollRef.current) {
+            restoredScrollRef.current = true;
+            const y = getScrollSync(id);
+            if (y > 0) scrollRef.current?.scrollTo({ y: Math.min(y, Math.max(0, h)), animated: false });
+          }
+        }}
+        onScrollBeginDrag={() => { editPinYRef.current = null; }}
+        onScroll={e => {
+          const y = e.nativeEvent.contentOffset.y;
+          scrollYRef.current = y;
+          const denom = Math.max(1, contentHRef.current - viewportHRef.current);
+          const pct = Math.min(100, Math.max(0, Math.round((y / denom) * 100)));
+          if (pct !== progressPctRef.current) { progressPctRef.current = pct; setProgress(pct); }
+          if (saveScrollTimer.current) clearTimeout(saveScrollTimer.current);
+          saveScrollTimer.current = setTimeout(() => setScroll(id, y), 400);
+        }}
       >
         {editing ? (
           <TextInput
             ref={bodyInputRef}
             autoFocus
             selection={sel ?? undefined}
-            style={[bodyTextStyle, styles.bodyInput]}
+            style={[bodyStyle, styles.bodyInput]}
             value={body}
             onChangeText={(t) => { if (sel) setSel(null); setBody(t); }}
             placeholder="Tap to start typing…"
@@ -1112,57 +1017,83 @@ export default function EditorScreen() {
             textAlignVertical="top"
             spellCheck={true}
             autoCorrect={true}
-            onBlur={() => setEditing(false)}
           />
         ) : (
-          <Pressable onPress={handleBodyTap} style={styles.bodyPress}>
-            <Text
-              style={bodyTextStyle}
-              onTextLayout={e => { linesRef.current = e.nativeEvent.lines; }}
-            >
-              {body
-                ? body
-                : <Text style={{ color: colors.placeholder }}>Tap to start typing…</Text>}
-            </Text>
-          </Pressable>
+          <Text
+            onTextLayout={e => { linesRef.current = e.nativeEvent.lines; computeLineStarts(); }}
+            style={bodyStyle}
+          >
+            {body}
+          </Text>
         )}
       </ScrollView>
-    </KeyboardAvoidingView>
 
-    {editing && keyboardVisible && (
-      <TouchableOpacity
-        style={[styles.kbDismiss, {
-          bottom: keyboardHeight + 8,
-          backgroundColor: colors.surface,
-          borderColor: colors.border,
-        }]}
-        onPress={handleDismissKeyboard}
-        activeOpacity={0.8}
-      >
-        <SymbolView
-          name="keyboard.chevron.compact.down"
-          size={ui(26)}
-          tintColor={colors.textMuted}
-          type="monochrome"
-        />
-      </TouchableOpacity>
-    )}
+      {/* Floating HUD — A− · progress · A+ and voice-follow. Present only. */}
+      {!editing && (
+        <View pointerEvents="box-none" style={[styles.hudWrap, { bottom: insets.bottom + ui(12) }]}>
+          <View style={[styles.hudPill, { width: pillW, backgroundColor: colors.surface, borderColor: colors.border }]}>
+            <TouchableOpacity
+              onPress={() => setFontIndex(i => Math.max(0, i - 1))}
+              disabled={fontIndex === 0}
+              hitSlop={{ top: 10, bottom: 10, left: 6, right: 6 }}
+              style={{ opacity: fontIndex === 0 ? 0.3 : 1 }}
+            >
+              <Text style={[styles.hudAa, { color: colors.text }]}>A−</Text>
+            </TouchableOpacity>
+            <View style={[styles.hudTrack, { backgroundColor: colors.border }]}>
+              <View style={[styles.hudFill, { width: `${progress}%`, backgroundColor: progressColor }]} />
+            </View>
+            <TouchableOpacity
+              onPress={() => setFontIndex(i => Math.min(FONT_SIZES.length - 1, i + 1))}
+              disabled={fontIndex === FONT_SIZES.length - 1}
+              hitSlop={{ top: 10, bottom: 10, left: 6, right: 6 }}
+              style={{ opacity: fontIndex === FONT_SIZES.length - 1 ? 0.3 : 1 }}
+            >
+              <Text style={[styles.hudAa, { color: colors.text }]}>A+</Text>
+            </TouchableOpacity>
+          </View>
+          {SHOW_VOICE_PLACEHOLDER && (
+            <TouchableOpacity
+              style={[styles.hudMic, {
+                backgroundColor: voiceOn ? colors.accent : colors.surface,
+                borderColor: voiceOn ? colors.accentBorder : colors.border,
+              }]}
+              onPress={toggleVoice}
+              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            >
+              <SymbolView
+                name={voiceOn ? 'mic.fill' : 'mic'}
+                size={ui(22)}
+                tintColor={voiceOn ? colors.accentText : colors.textMuted}
+                type="monochrome"
+              />
+            </TouchableOpacity>
+          )}
+        </View>
+      )}
 
-    {/* Popover menu. Third slot swaps based on note state:
-        - empty note  -> Import (the action you want on a fresh note)
-        - has content -> Check spelling
-        Home appears in every menu for consistent orientation. */}
-    {renderMenu([
-      { label: 'Go to top',    icon: 'arrow.up',          onPress: jumpToTop },
-      { label: 'Go to bottom', icon: 'arrow.down',        onPress: jumpToBottom },
-      ...(isEmpty
-        ? [{ label: 'Import',         icon: 'square.and.arrow.down', onPress: handlePickImport }]
-        : [{ label: 'Check spelling', icon: 'checkmark.circle',      onPress: handleCheck }]
-      ),
-      ...(isEmpty ? [] : [{ label: 'Print', icon: 'printer', onPress: handlePrint }]),
-      { label: 'Home',     icon: 'house',     onPress: jumpHome },
-      { label: 'Settings', icon: 'gearshape', onPress: () => router.push('/settings') },
-    ])}
+      {/* Keyboard-dismiss pill — collapses the keyboard, STAYS in edit mode. */}
+      {editing && keyboardVisible && (
+        <TouchableOpacity
+          style={[styles.kbDismiss, {
+            bottom: keyboardHeight + 8,
+            backgroundColor: colors.surface,
+            borderColor: colors.border,
+          }]}
+          onPress={collapseKeyboard}
+          activeOpacity={0.8}
+        >
+          <SymbolView
+            name="keyboard.chevron.compact.down"
+            size={ui(26)}
+            tintColor={colors.textMuted}
+            type="monochrome"
+          />
+        </TouchableOpacity>
+      )}
+
+      {/* Popover menu — items depend on mode. */}
+      {renderMenu(menuItems)}
     </View>
   );
 }
@@ -1171,7 +1102,7 @@ const styles = StyleSheet.create({
   flex:   { flex: 1 },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center' },
 
-  // Top bar (no bottom border — the title strip carries the divider)
+  // Top bar
   topBar: {
     flexDirection: 'row',
     alignItems: 'flex-end',
@@ -1181,7 +1112,6 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
   },
   topBarBack:    { flex: 1, flexDirection: 'row', alignItems: 'center' },
-  // Present-mode side slots — flex:1 spacers; only the inner button is tappable
   topBarSideStart: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-start' },
   topBarSideEnd:   { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end' },
   topBarBackInner: { flexDirection: 'row', alignItems: 'center' },
@@ -1189,16 +1119,13 @@ const styles = StyleSheet.create({
   topBarText:    { fontSize: ui(16), lineHeight: ui(22) },
   topBarCenter:  { flex: 1, alignItems: 'center', justifyContent: 'flex-end' },
   hamburgerBtn:  { padding: ui(4), borderRadius: ui(7) },
-  // Manual hamburger icon — explicit gap > line ratio so it doesn't look
-  // cramped the way SF Symbols' line.3.horizontal does at small sizes.
-  // justify-content: space-between distributes the three lines evenly.
   hamburgerIcon: { width: ui(22), height: ui(16), justifyContent: 'space-between' },
   hamburgerLine: { height: ui(2), width: '100%', borderRadius: ui(1) },
   topBarRight:   { flex: 1, alignItems: 'flex-end' },
   topBarBtn:     { paddingHorizontal: ui(14), paddingVertical: ui(4), borderRadius: ui(8), borderWidth: 1 },
   topBarBtnText: { fontSize: ui(14), fontWeight: '600' },
 
-  // Fixed centered title strip — snug, one line of text
+  // Fixed centered title strip
   titleBar: {
     height: TITLE_BAR_H,
     flexDirection: 'row',
@@ -1215,10 +1142,9 @@ const styles = StyleSheet.create({
     padding: 0,
   },
 
-  // Edit content
-  bodyContent:  { flexGrow: 1, paddingHorizontal: 18, paddingTop: ui(14) },
-  bodyPress:    { flexGrow: 1, minHeight: 320 },
-  bodyInput:    { padding: 0 },
+  // Body input (shares bodyStyle with the present-mode Text; padding must be
+  // 0 so the two render at identical positions)
+  bodyInput: { padding: 0 },
   kbDismiss: {
     position: 'absolute',
     right: 12,
@@ -1231,14 +1157,15 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.18, shadowRadius: 4, elevation: 5,
   },
 
-
-  // Presenter
-  presenterText: { fontWeight: '400' },
+  // Band + fades
   band: {
     position: 'absolute', left: 0, right: 0, zIndex: 10,
     borderTopWidth: 1.5, borderBottomWidth: 1.5,
   },
   fade: { position: 'absolute', left: 0, right: 0, zIndex: 9 },
+
+  // Spell-check review
+  reviewContent: { flexGrow: 1, paddingHorizontal: 18, paddingTop: ui(14) },
   misspell: { color: '#dc2626', textDecorationLine: 'underline', textDecorationColor: '#dc2626' },
   misspellCurrent: { color: '#dc2626', textDecorationLine: 'underline', textDecorationColor: '#dc2626', backgroundColor: 'rgba(220,38,38,0.14)', fontWeight: '700' },
   reviewBar: { borderTopWidth: StyleSheet.hairlineWidth, paddingHorizontal: ui(16), paddingTop: ui(12) },
@@ -1255,7 +1182,7 @@ const styles = StyleSheet.create({
   reviewActionBtn: { flex: 1, alignItems: 'center', paddingVertical: ui(10), borderRadius: ui(9), borderWidth: 1 },
   reviewActionText: { fontSize: ui(15), fontWeight: '600' },
 
-  // Floating presenter HUD
+  // Floating HUD
   hudWrap: {
     position: 'absolute', left: 0, right: 0,
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
@@ -1277,11 +1204,7 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.12, shadowRadius: 8, elevation: 5,
   },
 
-  // Popover menu under the hamburger — single card, anchored to the
-  // right edge of the screen, drops down from the top bar.
-  // zIndex > band's 10 so the green band overlay doesn't draw over it.
-  // Backdrop is transparent — it still catches outside taps to dismiss
-  // the menu, just without dimming the screen behind.
+  // Popover menu
   menuBackdrop: {
     position: 'absolute',
     left: 0,
@@ -1295,10 +1218,6 @@ const styles = StyleSheet.create({
     width: ui(220),
     zIndex: 21,
   },
-  // Drop shadow lives on a wrapper View, not on menuCard. menuCard uses
-  // overflow:'hidden' to clip its rows to the rounded corners, and on iOS
-  // overflow:hidden also clips the layer's shadow — so the shadow gets
-  // its own ancestor that doesn't clip.
   menuShadow: {
     borderRadius: 12,
     shadowColor: '#000',
