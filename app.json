@@ -56,6 +56,9 @@
         "UISupportsDocumentBrowser": false,
         "LSSupportsOpeningDocumentsInPlace": false,
         "ITSAppUsesNonExemptEncryption": false,
+        "UIBackgroundModes": [
+          "audio"
+        ],
         "NSMicrophoneUsageDescription": "Podium Notes uses the microphone only when you turn on voice tracking, so it can scroll your script as you speak. Audio is processed on your device and is not recorded or saved.",
         "NSSpeechRecognitionUsageDescription": "Podium Notes uses on-device speech recognition, only when you enable voice tracking, to match your spoken words to your script and scroll it automatically. Nothing is sent to a server.",
         "NSPhotoLibraryUsageDescription": "Podium Notes does not access your photo library. This description is required by a software component; the app will never request access to your photos."
