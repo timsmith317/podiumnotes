@@ -44,7 +44,7 @@ import { useNotes } from '../../lib/useNotes';
 import { getScrollSync, setScroll, clearScroll } from '../../lib/scrollMemory';
 import { check as spellCheck } from '../../modules/spell-check';
 import * as SpeechFollow from '../../modules/speech-follow';
-import * as SpeechPlayer from '../../modules/speech-player';
+import ListenSheet from '../../components/ListenSheet';
 import { useSettings, themeColors, fontFamily } from '../../lib/useSettings';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
@@ -125,7 +125,33 @@ export default function EditorScreen() {
   const [progress, setProgress] = useState(0);
   const [voiceOn, setVoiceOn] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  // Listen mode: mounted stays true after first open so playback state
+  // survives closing the card (close ≠ stop; lock-screen controls take over).
+  const [listenMounted, setListenMounted] = useState(false);
+  const [listenOpen, setListenOpen] = useState(false);
   const bodyInputRef = useRef(null);
+
+  function openListen() {
+    if (voiceOn) stopVoice();   // mic session and playback session conflict
+    setListenMounted(true);
+    setListenOpen(true);
+  }
+
+  // The sheet PULLS the band position at the moment it needs it (load,
+  // card open, or the "Start at band" button) — never a stale snapshot.
+  function currentBandOffset() {
+    const line = bandLine();
+    if (__DEV__) {
+      const denom = Math.max(1, contentHRef.current - viewportHRef.current);
+      const proportionalChar = Math.round((scrollYRef.current / denom) * body.length);
+      console.log('[listen] bandOffset pull: scrollY', Math.round(scrollYRef.current),
+        'of contentH', Math.round(contentHRef.current),
+        '| band line start', line ? line.start : null, 'of', body.length, 'chars',
+        '| proportional estimate', proportionalChar,
+        '| lineStarts entries', lineStartsRef.current.length);
+    }
+    return line ? line.start : 0;
+  }
 
   // ── The single scroll world ──
   const scrollRef = useRef(null);        // the one ScrollView
@@ -171,6 +197,7 @@ export default function EditorScreen() {
   useEffect(() => {
     if (!menuOpen) return;
     const y = scrollYRef.current;
+    if (__DEV__) console.log('[listen] menuOpen: scrollY', Math.round(y));
     if (y <= 0) return;
     requestAnimationFrame(() => scrollRef.current?.scrollTo({ y, animated: false }));
   }, [menuOpen]);
@@ -570,40 +597,6 @@ export default function EditorScreen() {
     );
   }
 
-  // ── TEMPORARY (feature/listen-mode): dev-only smoke test for the
-  // SpeechPlayer native module. v2: logs the installed voice inventory and
-  // auto-selects the best available (premium > enhanced > default) — the
-  // stock default voice is the compact robotic one and unusable for real
-  // listening. Enhanced/Premium voices are downloaded per-device in
-  // Settings → Accessibility → Spoken Content → Voices.
-  async function devSmokeTest() {
-    try {
-      const voices = await SpeechPlayer.getVoices();
-      console.log('[listen-smoke] installed voices:',
-        voices.map(v => `${v.name} (q${v.quality})`).join(', '));
-      const best = voices.find(v => v.name.startsWith('Lee')) || voices[0]; // audition Lee; fall back to best quality
-      console.log('[listen-smoke] using voice:', best?.name, 'quality', best?.quality);
-      if (!best || best.quality === 1) {
-        Alert.alert('Only the basic voice is installed',
-          'For a natural voice, download a Premium voice in Settings → Accessibility → Spoken Content → Voices → English (e.g. Ava Premium), then try again.');
-      }
-      console.log('[listen-smoke] synthesizing…');
-      const t0 = Date.now();
-      const { uri, duration } = await SpeechPlayer.synthesizeToFile(
-        body || 'This is a test of listen mode.',
-        FileSystem.documentDirectory + 'audio/smoke-test.m4a',
-        best ? { voiceId: best.id } : {}
-      );
-      console.log('[listen-smoke] synthesized', Math.round(duration), 'sec of audio in',
-        ((Date.now() - t0) / 1000).toFixed(1), 'sec →', uri);
-      await SpeechPlayer.load(uri, title || 'Smoke Test');
-      SpeechPlayer.play();
-    } catch (e) {
-      console.warn('[listen-smoke] failed:', e);
-      Alert.alert('Smoke test failed', String(e?.message || e));
-    }
-  }
-
   // Print via the native iOS print sheet (AirPrint, Save to PDF, etc.).
   async function handlePrint() {
     setMenuOpen(false);
@@ -919,7 +912,7 @@ export default function EditorScreen() {
         { label: 'Go to top',    icon: 'arrow.up',           onPress: jumpToTop },
         { label: 'Go to bottom', icon: 'arrow.down',         onPress: jumpToBottom },
         { label: 'Edit',         icon: 'square.and.pencil',  onPress: enterEdit },
-        ...(__DEV__ ? [{ label: 'Listen (dev)', icon: 'play.circle', onPress: devSmokeTest }] : []),
+        { label: 'Listen',       icon: 'play.circle',        onPress: openListen },
         { label: 'Print',        icon: 'printer',            onPress: handlePrint },
         { label: 'Home',         icon: 'house',              onPress: jumpHome },
         { label: 'Settings',     icon: 'gearshape',          onPress: () => router.push('/settings') },
@@ -1130,6 +1123,20 @@ export default function EditorScreen() {
 
       {/* Popover menu — items depend on mode. */}
       {renderMenu(menuItems)}
+
+      {/* Listen mode player — mounted after first open; card visibility
+          toggles with listenOpen while playback continues underneath. */}
+      {listenMounted && (
+        <ListenSheet
+          open={listenOpen}
+          note={{ id, title, body }}
+          wpm={settings.wpm || 130}
+          colors={colors}
+          insets={insets}
+          getBandOffset={currentBandOffset}
+          onClose={() => setListenOpen(false)}
+        />
+      )}
     </View>
   );
 }

@@ -37,6 +37,8 @@ public class SpeechPlayerModule: Module {
   private var synthesizer: AVSpeechSynthesizer?
   private var synthFile: AVAudioFile?
   private var synthChunks: [String] = []
+  private var synthChunkOffsets: [Int] = []
+  private var synthMarks: [[String: Any]] = []
   private var synthChunkIndex = 0
   private var synthVoiceId: String?
   private var synthRate: Float = AVSpeechUtteranceDefaultSpeechRate
@@ -93,16 +95,32 @@ public class SpeechPlayerModule: Module {
         // Paragraph-chunked: one giant utterance is where long-text synthesis
         // gets flaky; per-paragraph utterances written to one file is robust,
         // and postUtteranceDelay gives natural paragraph pauses for free.
-        let chunks = text
-          .components(separatedBy: "\n\n")
-          .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-          .filter { !$0.isEmpty }
+        // Each chunk's CHARACTER OFFSET in the original text is kept so the
+        // finished file carries a paragraph → time map (start-at-band seeks
+        // land exactly on paragraph starts instead of a proportional guess).
+        var chunks: [String] = []
+        var offsets: [Int] = []
+        var searchStart = text.startIndex
+        for piece in text.components(separatedBy: "\n\n") {
+          let trimmed = piece.trimmingCharacters(in: .whitespacesAndNewlines)
+          guard !trimmed.isEmpty else { continue }
+          if let r = text.range(of: trimmed, range: searchStart..<text.endIndex) {
+            chunks.append(trimmed)
+            offsets.append(text.distance(from: text.startIndex, to: r.lowerBound))
+            searchStart = r.upperBound
+          } else {
+            chunks.append(trimmed)
+            offsets.append(offsets.last ?? 0)
+          }
+        }
         guard !chunks.isEmpty else {
           promise.reject("E_EMPTY", "Nothing to synthesize")
           return
         }
 
         self.synthChunks = chunks
+        self.synthChunkOffsets = offsets
+        self.synthMarks = []
         self.synthChunkIndex = 0
         self.synthVoiceId = options["voiceId"] as? String
         self.synthRate = (options["rate"] as? Double).map { Float($0) } ?? AVSpeechUtteranceDefaultSpeechRate
@@ -211,6 +229,10 @@ public class SpeechPlayerModule: Module {
       return
     }
 
+    // Mark this paragraph's start time before rendering it.
+    let markTime = synthSampleRate > 0 ? Double(synthFrames) / synthSampleRate : 0
+    synthMarks.append(["offset": synthChunkOffsets[synthChunkIndex], "time": markTime])
+
     let utterance = AVSpeechUtterance(string: synthChunks[synthChunkIndex])
     utterance.rate = synthRate
     utterance.postUtteranceDelay = 0.35   // paragraph breath
@@ -259,13 +281,16 @@ public class SpeechPlayerModule: Module {
   private func finishSynthesis(promise: Promise) {
     let seconds = synthSampleRate > 0 ? Double(synthFrames) / synthSampleRate : 0
     let uri = synthURL?.absoluteString ?? ""
+    let marks = synthMarks
     resetSynthesis()
-    promise.resolve(["uri": uri, "duration": seconds])
+    promise.resolve(["uri": uri, "duration": seconds, "marks": marks])
   }
 
   private func resetSynthesis() {
     synthFile = nil
     synthChunks = []
+    synthChunkOffsets = []
+    synthMarks = []
     synthChunkIndex = 0
     synthFrames = 0
     synthURL = nil

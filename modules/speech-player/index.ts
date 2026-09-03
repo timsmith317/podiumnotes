@@ -9,8 +9,14 @@ const SpeechPlayer = requireNativeModule('SpeechPlayer');
 
 export type Voice = { id: string; name: string; language: string; quality: number };
 
+// Legacy novelty voices (Zarvox, Fred, Bells, ...) and the robotic Eloquence
+// accessibility set share distinct identifier families — neither belongs in
+// a listening picker.
+const EXCLUDED_VOICE_IDS = /com\.apple\.speech\.synthesis\.voice|com\.apple\.eloquence/;
+
 export async function getVoices(): Promise<Voice[]> {
-  return await SpeechPlayer.getVoices();
+  const voices: Voice[] = await SpeechPlayer.getVoices();
+  return voices.filter(v => !EXCLUDED_VOICE_IDS.test(v.id));
 }
 
 // Renders text to an .m4a at `path` (absolute). rate is the AVSpeechUtterance
