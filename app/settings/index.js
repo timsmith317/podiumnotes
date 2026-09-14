@@ -2,7 +2,7 @@
 import { useState, useEffect } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, ScrollView, Pressable, useColorScheme,
-  Linking,
+  Linking, Alert,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
@@ -10,7 +10,18 @@ import { useSettings, themeColors } from '../../lib/useSettings';
 import { uis, uit } from '../../lib/scale';
 import { bandFillColor, bandBorderColor } from '../../lib/bandColor';
 import { getDiagnostics, SYNC_STATUS } from '../../lib/sync';
+import { audioCacheBytes, clearAudioCache } from '../../lib/listen';
 import PaceTrainer from '../../lib/PaceTrainer';
+
+// Sizes are shown in whole units: nobody reading a storage row wants three
+// decimal places, and "Zero KB" reads better than "0 B" for an empty cache.
+function formatBytes(n) {
+  if (!n || n < 1024) return 'Zero KB';
+  const mb = n / (1024 * 1024);
+  if (mb < 1) return `${Math.round(n / 1024)} KB`;
+  if (mb < 1024) return `${mb.toFixed(mb < 10 ? 1 : 0)} MB`;
+  return `${(mb / 1024).toFixed(1)} GB`;
+}
 
 // Human-readable relative time for "last sync". Kept tiny — this only ever
 // formats a recent-ish timestamp for the diagnostics panel.
@@ -114,6 +125,18 @@ export default function SettingsScreen() {
   // is safe to ship ahead of the sync call sites being finalized.
   const [diagOpen, setDiagOpen] = useState(false);
   const [diag, setDiag] = useState(null);
+  // null until measured, so the row shows a placeholder rather than briefly
+  // claiming the cache is empty.
+  const [cacheBytes, setCacheBytes] = useState(null);
+  const [clearing, setClearing] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    audioCacheBytes()
+      .then(n => { if (alive) setCacheBytes(n); })
+      .catch(() => { if (alive) setCacheBytes(0); });
+    return () => { alive = false; };
+  }, []);
 
   useEffect(() => {
     if (!diagOpen) return;
@@ -341,6 +364,47 @@ export default function SettingsScreen() {
           Font size and spellcheck can be adjusted per note using the controls in the editor and presenter.
         </Text>
 
+        {/* Rendered audio is derived data — the notes are the source of
+            truth — so clearing it is always safe. It's worth surfacing
+            because the app is already large, and unexplained storage with no
+            control is what turns a big download into a complaint. */}
+        <SectionLabel label="Storage" />
+        <View style={[styles.storageRow, { borderColor: colors.border }]}>
+          <Text style={[styles.storageLabel, { color: colors.text }]}>Audio Cache</Text>
+          <Text style={[styles.storageValue, { color: colors.textMuted }]}>
+            {cacheBytes == null ? '…' : formatBytes(cacheBytes)}
+          </Text>
+        </View>
+        <TouchableOpacity
+          style={[styles.storageRow, { borderColor: colors.border, opacity: clearing || !cacheBytes ? 0.4 : 1 }]}
+          disabled={clearing || !cacheBytes}
+          onPress={() => {
+            Alert.alert(
+              'Clear audio cache?',
+              'Spoken audio will be created again the next time you listen to a note. Your notes and your place in them are not affected.',
+              [
+                { text: 'Cancel', style: 'cancel' },
+                {
+                  text: 'Clear', style: 'destructive',
+                  onPress: async () => {
+                    setClearing(true);
+                    await clearAudioCache();
+                    setCacheBytes(await audioCacheBytes());
+                    setClearing(false);
+                  },
+                },
+              ]
+            );
+          }}
+        >
+          <Text style={[styles.storageLabel, { color: '#b91c1c' }]}>
+            {clearing ? 'Clearing…' : 'Clear Cache'}
+          </Text>
+        </TouchableOpacity>
+        <Text style={[styles.hint, { color: colors.textFaint }]}>
+          Audio is generated on your device as you listen and stored so replaying a note is instant.
+        </Text>
+
         {/* Attribution for the bundled speech model.
             The OpenRAIL-M licence the weights ship under requires that
             recipients are told what they're getting and are passed the
@@ -488,6 +552,13 @@ const styles = StyleSheet.create({
   measureBtnText:    { fontSize: uit(16), fontWeight: '700', textAlign: 'center' },
   measureBtnSub:     { fontSize: uit(13), marginTop: uis(4), lineHeight: uit(18), textAlign: 'center' },
 
+  storageRow: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    paddingVertical: uis(12),
+  },
+  storageLabel: { fontSize: uit(16) },
+  storageValue: { fontSize: uit(16) },
   colorScroll:   { paddingVertical: uis(4), gap: uis(10), paddingRight: uis(8) },
   colorSwatch:   { width: uis(40), height: uis(40), borderRadius: uis(20), alignItems: 'center', justifyContent: 'center' },
   // Selection now reads as a thicker ring in the colour itself; a white ring

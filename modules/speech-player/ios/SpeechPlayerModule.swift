@@ -532,6 +532,16 @@ public class SpeechPlayerModule: Module {
         try? self.teardownPlayer(deactivateSession: true)
         self.synthesizer?.stopSpeaking(at: .immediate)
         self.synthesizer = nil
+
+        // Release the ONNX sessions. This module instance is going away, but
+        // the engine holds a ~400MB model — and without dropping it, a
+        // JavaScript reload built a SECOND module that loaded the model
+        // again alongside the first. Two copies of the largest thing in the
+        // app is enough for iOS to terminate the process, which looked like
+        // the app vanishing to the background on every reload.
+        self.supertonic?.cancel()
+        self.supertonic?.unload()
+        self.supertonic = nil
       }
     }
   }
