@@ -2,6 +2,7 @@
 import { useState, useEffect } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, ScrollView, Pressable, useColorScheme,
+  Linking,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
@@ -339,6 +340,31 @@ export default function SettingsScreen() {
         <Text style={[styles.hint, { color: colors.textFaint }]}>
           Font size and spellcheck can be adjusted per note using the controls in the editor and presenter.
         </Text>
+
+        {/* Attribution for the bundled speech model.
+            The OpenRAIL-M licence the weights ship under requires that
+            recipients are told what they're getting and are passed the
+            licence terms, so this is a requirement rather than a courtesy.
+            The "on your device" line is also worth saying plainly: people
+            reasonably assume a natural-sounding voice means their sermon
+            was uploaded somewhere. */}
+        <SectionLabel label="Voice" />
+        <Text style={[styles.fadeDesc, { color: colors.textMuted }]}>
+          Listen mode reads your notes aloud with {'\u201C'}James{'\u201D'}, a neural voice
+          generated entirely on your device. Nothing you write is sent anywhere.
+        </Text>
+        <Text style={[styles.hint, { color: colors.textFaint }]}>
+          Speech synthesis by Supertonic (Supertone Inc.), used under the
+          BigScience OpenRAIL-M licence. Runs on ONNX Runtime.
+        </Text>
+        <TouchableOpacity
+          onPress={() => Linking.openURL('https://huggingface.co/Supertone/supertonic-3').catch(() => {})}
+          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+        >
+          <Text style={[styles.hint, { color: colors.accent, textDecorationLine: 'underline' }]}>
+            View the model and its licence
+          </Text>
+        </TouchableOpacity>
       </ScrollView>
 
       {/* Hidden sync diagnostics panel. Absolute overlay (not a nested Modal —
