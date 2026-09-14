@@ -129,6 +129,13 @@ export async function renderSegments(
 // Finished segments stay on disk and are reused if the note is replayed.
 export function cancelProgressive(): void { SpeechPlayer.cancelProgressive(); }
 
+// Absolute paths to the speech model inside the app bundle. Empty strings
+// when it isn't there — which should only happen if the build-time copy
+// failed, since the model ships with the app.
+export function bundledModelPaths(): { modelDir: string; styleDir: string } {
+  return SpeechPlayer.bundledModelPaths();
+}
+
 export async function load(uri: string, title: string): Promise<{ duration: number }> {
   return await SpeechPlayer.load(uri, title);
 }

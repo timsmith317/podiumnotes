@@ -346,6 +346,35 @@ public class SpeechPlayerModule: Module {
       }
     }
 
+    // Where the bundled speech model lives.
+    //
+    // The model ships INSIDE the app now (copied in at build time by
+    // plugins/withSpeechModel.js), so only native code knows the path — JS
+    // can't compute a bundle location. Returning it here keeps the existing
+    // arrangement intact: JS still owns which paths get passed to
+    // synthesis, it just asks where they are first.
+    //
+    // Empty strings rather than nulls: the bridge handles them more
+    // predictably, and the caller only needs a truthiness check.
+    Function("bundledModelPaths") { () -> [String: String] in
+      guard let base = Bundle.main.resourceURL else {
+        return ["modelDir": "", "styleDir": ""]
+      }
+      let onnx = base.appendingPathComponent("onnx")
+      let styles = base.appendingPathComponent("voice_styles")
+      let fm = FileManager.default
+      // Check the config AND the largest weight file: a truncated copy would
+      // otherwise pass as present and fail later inside ONNX.
+      let ok = fm.fileExists(atPath: onnx.appendingPathComponent("tts.json").path)
+        && fm.fileExists(atPath: onnx.appendingPathComponent("vector_estimator.onnx").path)
+        && fm.fileExists(atPath: styles.appendingPathComponent("M1.json").path)
+      if !ok {
+        NSLog("[SpeechPlayer] bundled model missing under \(base.path)")
+        return ["modelDir": "", "styleDir": ""]
+      }
+      return ["modelDir": onnx.path, "styleDir": styles.path]
+    }
+
     Function("cancelProgressive") {
       self.supertonic?.cancel()
     }
