@@ -7,6 +7,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { useSettings, themeColors } from '../../lib/useSettings';
 import { uis, uit } from '../../lib/scale';
+import { bandFillColor, bandBorderColor } from '../../lib/bandColor';
 import { getDiagnostics, SYNC_STATUS } from '../../lib/sync';
 import PaceTrainer from '../../lib/PaceTrainer';
 
@@ -297,12 +298,28 @@ export default function SettingsScreen() {
                 onPress={() => update({ bandColor: c.value })}
                 style={[
                   styles.colorSwatch,
-                  { backgroundColor: isClear ? 'transparent' : c.value },
+                  // Drawn exactly as the band will be — a pale fill inside a
+                  // stronger outline — rather than as a solid block of the
+                  // raw colour. A solid swatch promised a confident colour
+                  // and produced a faint band, so picking the band you
+                  // wanted meant picking a swatch you didn't.
+                  {
+                    backgroundColor: bandFillColor(c.value),
+                    borderColor: bandBorderColor(c.value),
+                    borderWidth: on ? 3 : 2,
+                  },
                   isClear && styles.colorSwatchClear,
-                  on && styles.colorSwatchOn,
                 ]}
               >
-                {on && <Text style={isClear ? styles.colorCheckDark : styles.colorCheck}>✓</Text>}
+                {/* The tick is the colour itself: white would vanish on a
+                    15% fill, and a fixed dark grey would read as a different
+                    swatch from the one you chose. */}
+                {on && (
+                  <Text style={[
+                    styles.colorCheck,
+                    { color: isClear ? '#475569' : c.value },
+                  ]}>✓</Text>
+                )}
               </TouchableOpacity>
             );
           })}
@@ -447,10 +464,10 @@ const styles = StyleSheet.create({
 
   colorScroll:   { paddingVertical: uis(4), gap: uis(10), paddingRight: uis(8) },
   colorSwatch:   { width: uis(40), height: uis(40), borderRadius: uis(20), alignItems: 'center', justifyContent: 'center' },
-  colorSwatchOn:    { borderWidth: 3, borderColor: '#fff' },
-  colorSwatchClear: { borderWidth: 1.5, borderColor: '#94a3b8', borderStyle: 'dashed' },
-  colorCheck:       { color: '#fff', fontWeight: '800', fontSize: uit(16) },
-  colorCheckDark:   { color: '#475569', fontWeight: '800', fontSize: uit(16) },
+  // Selection now reads as a thicker ring in the colour itself; a white ring
+  // disappeared against a pale fill.
+  colorSwatchClear: { borderStyle: 'dashed' },
+  colorCheck:       { fontWeight: '800', fontSize: uit(16) },
   colorLabel:    { fontSize: uit(13), marginTop: uis(8) },
 
   fadeDesc: { fontSize: uit(13), lineHeight: uit(18), marginBottom: uis(10) },
