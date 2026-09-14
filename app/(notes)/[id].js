@@ -661,11 +661,6 @@ export default function EditorScreen() {
       lastCueRef.current = cue;
       cueYRef.current = lineYForOffset(offsetForCueText(cue.text, 0));
       nextYRef.current = null;
-      if (__DEV__) {
-        console.log('[follow] cue @', cue.time.toFixed(1) + 's → y',
-          cueYRef.current == null ? 'NO MATCH' : Math.round(cueYRef.current),
-          '|', cue.text.slice(0, 28));
-      }
     }
     if (nextYRef.current == null && next) {
       nextYRef.current = lineYForOffset(offsetForCueText(next.text, 0));
@@ -715,6 +710,43 @@ export default function EditorScreen() {
     scriptWordsRef.current = [];
     lastCueRef.current = null;
   }, [body]);
+
+  // Voice-follow errors used to be swallowed entirely, which made the one
+  // genuinely actionable failure invisible: on macOS, SFSpeechRecognizer
+  // runs through the Dictation service, and with Dictation switched off
+  // every recognition task fails instantly. Permissions look granted, the
+  // microphone works, and nothing is transcribed — unguessable without
+  // being told.
+  //
+  // The payload may arrive as a string or as an object depending on the
+  // module wrapper, so read it defensively and fall back to matching the
+  // message text.
+  function handleVoiceError(payload) {
+    let code = '', message = '';
+    try {
+      if (typeof payload === 'string') message = payload;
+      else if (payload) { code = payload.code || ''; message = payload.message || ''; }
+    } catch (e) {}
+
+    stopVoice();
+
+    const dictationOff = code === 'dictation-disabled'
+      || /dictation/i.test(message);
+
+    if (dictationOff) {
+      Alert.alert(
+        'Dictation is turned off',
+        'Voice follow uses the system dictation service to recognise speech.\n\n' +
+        'On Mac: System Settings \u2192 Keyboard \u2192 Dictation\n' +
+        'On iPhone or iPad: Settings \u2192 General \u2192 Keyboard \u2192 Enable Dictation\n\n' +
+        'Turn it on, then try voice follow again.'
+      );
+      return;
+    }
+    if (message) {
+      Alert.alert('Voice follow', message);
+    }
+  }
 
   // Find the script-word index that matches wherever the reader is currently
   // scrolled, so voice-follow starts from the band — not the top of the note.
@@ -793,7 +825,7 @@ export default function EditorScreen() {
       lastScrollLineRef.current = -1;
       voiceSubsRef.current = [
         SpeechFollow.addTranscriptListener(handleTranscript),
-        SpeechFollow.addErrorListener(() => {}),
+        SpeechFollow.addErrorListener(handleVoiceError),
       ];
       const ok = await SpeechFollow.start('en-US');
       if (ok) setVoiceOn(true);

@@ -36,6 +36,13 @@ public class SpeechFollowModule: Module {
   private var task: SFSpeechRecognitionTask?
   private var listening = false
   private var localeId = "en-US"
+  // Recognition tasks are time-limited and restarted on purpose, so an error
+  // normally means "cycle". But an error that will recur every time — a
+  // disabled Dictation service, most of all — turns that into an infinite
+  // restart loop holding the microphone open. Counting consecutive failures
+  // with no transcript in between distinguishes the two.
+  private var consecutiveFailures = 0
+  private static let maxConsecutiveFailures = 3
 
   public func definition() -> ModuleDefinition {
     Name("SpeechFollow")
@@ -87,7 +94,7 @@ public class SpeechFollowModule: Module {
           promise.resolve(true)
         } catch {
           NSLog("[sf] beginSession threw: \(error.localizedDescription)")
-          self.sendEvent("onError", ["message": error.localizedDescription])
+          self.sendEvent("onError", ["code": "start-failed", "message": error.localizedDescription])
           self.endSession()
           promise.resolve(false)
         }
@@ -108,17 +115,18 @@ public class SpeechFollowModule: Module {
     let rec = SFSpeechRecognizer(locale: Locale(identifier: localeId)) ?? SFSpeechRecognizer()
     guard let rec = rec else {
       NSLog("[sf] FAIL: no recognizer for locale \(localeId)")
-      sendEvent("onError", ["message": "Speech recognizer unavailable for \(localeId)"])
+      sendEvent("onError", ["code": "no-recognizer", "message": "Speech recognizer unavailable for \(localeId)"])
       return
     }
     NSLog("[sf] recognizer available=\(rec.isAvailable) onDevice=\(rec.supportsOnDeviceRecognition)")
     guard rec.isAvailable else {
       NSLog("[sf] FAIL: recognizer reports unavailable")
-      sendEvent("onError", ["message": "Speech recognizer unavailable"])
+      sendEvent("onError", ["code": "unavailable", "message": "Speech recognizer unavailable"])
       return
     }
     recognizer = rec
     listening = true
+    consecutiveFailures = 0
     try startTask()
     sendEvent("onStatus", ["listening": true])
   }
@@ -147,7 +155,7 @@ public class SpeechFollowModule: Module {
       // The classic Designed-for-iPad microphone failure: the node exists
       // but reports no channels, and installTap would crash.
       NSLog("[sf] FAIL: input node has no usable format — microphone unavailable")
-      sendEvent("onError", ["message": "No microphone input available"])
+      sendEvent("onError", ["code": "no-microphone", "message": "No microphone input available"])
       listening = false
       return
     }
@@ -168,11 +176,38 @@ public class SpeechFollowModule: Module {
     task = recognizer?.recognitionTask(with: req) { [weak self] result, error in
       guard let self = self else { return }
       if let result = result {
+        self.consecutiveFailures = 0     // progress: the cycle is healthy
         self.sendEvent("onTranscript", ["text": result.bestTranscription.formattedString])
       }
+
       if let error = error {
         NSLog("[sf] recognition error: \(error.localizedDescription)")
+
+        // macOS routes SFSpeechRecognizer through the Dictation service. With
+        // Dictation switched off in System Settings every task fails
+        // immediately with this message — permissions look fine, the
+        // microphone works, and nothing is transcribed. Worth naming
+        // precisely, since the fix is one toggle and is impossible to guess.
+        if error.localizedDescription.localizedCaseInsensitiveContains("dictation") {
+          self.sendEvent("onError", [
+            "code": "dictation-disabled",
+            "message": error.localizedDescription,
+          ])
+          self.endSession()
+          return
+        }
+
+        self.consecutiveFailures += 1
+        if self.consecutiveFailures >= Self.maxConsecutiveFailures {
+          self.sendEvent("onError", [
+            "code": "recognition-failed",
+            "message": error.localizedDescription,
+          ])
+          self.endSession()
+          return
+        }
       }
+
       if error != nil || (result?.isFinal ?? false) {
         self.cycleTask()
       }
@@ -198,7 +233,7 @@ public class SpeechFollowModule: Module {
     request?.endAudio(); request = nil
     task?.cancel(); task = nil
     do { try startTask() } catch {
-      sendEvent("onError", ["message": error.localizedDescription])
+      sendEvent("onError", ["code": "restart-failed", "message": error.localizedDescription])
     }
   }
 
