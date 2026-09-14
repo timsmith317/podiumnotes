@@ -27,6 +27,15 @@ export function addStatusListener(cb: (listening: boolean) => void) {
   return SpeechFollow.addListener('onStatus', (e: { listening: boolean }) => cb(e.listening));
 }
 
-export function addErrorListener(cb: (message: string) => void) {
-  return SpeechFollow.addListener('onError', (e: { message: string }) => cb(e.message));
+// The event is "onFollowError", not "onError": SpeechPlayer declares an
+// "onError" of its own, and identically named events were reaching both
+// modules' listeners — a disabled Dictation service produced a voice-follow
+// alert AND a playback alert.
+//
+// The whole payload is forwarded rather than just the message, so callers can
+// branch on `code` instead of matching error text that Apple may reword.
+export function addErrorListener(
+  cb: (e: { code?: string; message: string }) => void
+) {
+  return SpeechFollow.addListener('onFollowError', (e: { code?: string; message: string }) => cb(e));
 }

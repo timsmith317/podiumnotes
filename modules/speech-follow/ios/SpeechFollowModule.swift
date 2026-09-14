@@ -47,21 +47,20 @@ public class SpeechFollowModule: Module {
   public func definition() -> ModuleDefinition {
     Name("SpeechFollow")
 
-    Events("onTranscript", "onStatus", "onError")
+    // Event names are MODULE-SCOPED only if they're unique. SpeechPlayer also
+    // declares "onError", and a recognition failure was surfacing in Listen's
+    // playback error handler — two unrelated alerts for one problem. Prefixed
+    // names remove the ambiguity rather than filtering it downstream.
+    Events("onTranscript", "onStatus", "onFollowError")
 
     AsyncFunction("requestPermissions") { (promise: Promise) in
       SFSpeechRecognizer.requestAuthorization { status in
-        NSLog("[sf] speech authorization: \(Self.authName(status))")
         let speechOK = status == .authorized
 
         // AVCaptureDevice rather than AVAudioSession: the session variant
         // can silently never call back on macOS, which left this promise
         // pending forever.
-        let micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
-        NSLog("[sf] mic authorization (before request): \(Self.captureName(micStatus))")
-
         AVCaptureDevice.requestAccess(for: .audio) { micOK in
-          NSLog("[sf] mic granted: \(micOK) | speech granted: \(speechOK)")
           DispatchQueue.main.async { promise.resolve(speechOK && micOK) }
         }
       }
@@ -94,7 +93,7 @@ public class SpeechFollowModule: Module {
           promise.resolve(true)
         } catch {
           NSLog("[sf] beginSession threw: \(error.localizedDescription)")
-          self.sendEvent("onError", ["code": "start-failed", "message": error.localizedDescription])
+          self.sendEvent("onFollowError", ["code": "start-failed", "message": error.localizedDescription])
           self.endSession()
           promise.resolve(false)
         }
@@ -110,18 +109,16 @@ public class SpeechFollowModule: Module {
 
   private func beginSession() throws {
     endSession()
-    NSLog("[sf] beginSession locale=\(localeId)")
 
     let rec = SFSpeechRecognizer(locale: Locale(identifier: localeId)) ?? SFSpeechRecognizer()
     guard let rec = rec else {
       NSLog("[sf] FAIL: no recognizer for locale \(localeId)")
-      sendEvent("onError", ["code": "no-recognizer", "message": "Speech recognizer unavailable for \(localeId)"])
+      sendEvent("onFollowError", ["code": "no-recognizer", "message": "Speech recognizer unavailable for \(localeId)"])
       return
     }
-    NSLog("[sf] recognizer available=\(rec.isAvailable) onDevice=\(rec.supportsOnDeviceRecognition)")
     guard rec.isAvailable else {
       NSLog("[sf] FAIL: recognizer reports unavailable")
-      sendEvent("onError", ["code": "unavailable", "message": "Speech recognizer unavailable"])
+      sendEvent("onFollowError", ["code": "unavailable", "message": "Speech recognizer unavailable"])
       return
     }
     recognizer = rec
@@ -150,12 +147,11 @@ public class SpeechFollowModule: Module {
 
     let input = audioEngine.inputNode
     let format = input.outputFormat(forBus: 0)
-    NSLog("[sf] input format: \(format.sampleRate) Hz, \(format.channelCount) ch")
     guard format.channelCount > 0, format.sampleRate > 0 else {
       // The classic Designed-for-iPad microphone failure: the node exists
       // but reports no channels, and installTap would crash.
       NSLog("[sf] FAIL: input node has no usable format — microphone unavailable")
-      sendEvent("onError", ["code": "no-microphone", "message": "No microphone input available"])
+      sendEvent("onFollowError", ["code": "no-microphone", "message": "No microphone input available"])
       listening = false
       return
     }
@@ -167,7 +163,6 @@ public class SpeechFollowModule: Module {
     audioEngine.prepare()
     do {
       try audioEngine.start()
-      NSLog("[sf] audio engine started")
     } catch {
       NSLog("[sf] FAIL: audio engine start: \(error.localizedDescription)")
       throw error
@@ -189,7 +184,7 @@ public class SpeechFollowModule: Module {
         // microphone works, and nothing is transcribed. Worth naming
         // precisely, since the fix is one toggle and is impossible to guess.
         if error.localizedDescription.localizedCaseInsensitiveContains("dictation") {
-          self.sendEvent("onError", [
+          self.sendEvent("onFollowError", [
             "code": "dictation-disabled",
             "message": error.localizedDescription,
           ])
@@ -199,7 +194,7 @@ public class SpeechFollowModule: Module {
 
         self.consecutiveFailures += 1
         if self.consecutiveFailures >= Self.maxConsecutiveFailures {
-          self.sendEvent("onError", [
+          self.sendEvent("onFollowError", [
             "code": "recognition-failed",
             "message": error.localizedDescription,
           ])
@@ -212,7 +207,6 @@ public class SpeechFollowModule: Module {
         self.cycleTask()
       }
     }
-    NSLog("[sf] recognition task created: \(task != nil)")
   }
 
   private func configureRecordSession() {
@@ -233,7 +227,7 @@ public class SpeechFollowModule: Module {
     request?.endAudio(); request = nil
     task?.cancel(); task = nil
     do { try startTask() } catch {
-      sendEvent("onError", ["code": "restart-failed", "message": error.localizedDescription])
+      sendEvent("onFollowError", ["code": "restart-failed", "message": error.localizedDescription])
     }
   }
 
