@@ -34,7 +34,7 @@ import { useEffect, useState, useRef, useCallback } from 'react';
 import {
   View, Text, TextInput, ScrollView, TouchableOpacity, Pressable,
   StyleSheet, useWindowDimensions, useColorScheme, Keyboard, Alert,
-  Platform,
+  Platform, PanResponder, Animated, Easing,
 } from 'react-native';
 import { useLocalSearchParams, useNavigation, useRouter, useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -44,13 +44,15 @@ import { useNotes } from '../../lib/useNotes';
 import { getScrollSync, setScroll, clearScroll } from '../../lib/scrollMemory';
 import { check as spellCheck } from '../../modules/spell-check';
 import * as SpeechFollow from '../../modules/speech-follow';
-import ListenSheet from '../../components/ListenSheet';
 import { useSettings, themeColors, fontFamily } from '../../lib/useSettings';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import { readDocumentAsText } from '../../lib/importers';
+import { prepareHeadStart } from '../../lib/listen';
+import { useListen, fmt } from '../../lib/useListen';
 import * as Print from 'expo-print';
 import { ui, IS_TABLET } from '../../lib/scale';
+import { bandAlphaColor, bandFillColor, bandBorderColor } from '../../lib/bandColor';
 
 // Font ladder — shared by present AND edit modes (one layout is the whole
 // point). iPad gets a taller ceiling for podium-distance reading.
@@ -79,6 +81,97 @@ const VOICE_LEAD_LINES_TABLET = 1;
 // Layout constants (heights below the safe-area inset)
 const TOP_BAR_H   = ui(38);   // Back / menu bar
 const TITLE_BAR_H = ui(36);   // fixed centered title strip
+
+// Where a spoken paragraph's first line lands, as a fraction down the scroll
+// viewport. Low enough to read from comfortably, high enough that a long
+// paragraph can play out below it without reaching the HUD.
+const FOLLOW_TOP_FRAC = 0.18;
+
+// Opacity of the progress bar's fill, between the band's 15% fill and its
+// 75% border. Nudge toward 0.75 for more punch, toward 0.15 to match the
+// band's fill literally.
+const BAR_ALPHA = 0.40;
+
+
+// Audio-mode indicator for the top bar. Lives in the gap between Back and
+// the hamburger — space that was already empty — so listening mode gets a
+// positive cue without taking a single point from the text.
+//
+// Bars animate only while audio is actually playing; paused leaves them
+// static, so the graphic distinguishes "listening" from "listening and
+// currently speaking" the same way the transport icon does.
+// Geometry for the wave: a strip TWO periods wide is drawn and slid left by
+// exactly one period, so the loop is seamless — the shape at the end of the
+// cycle is identical to the shape at the start.
+// Audio-mode indicator for the top bar. Lives in the gap between Back and
+// the hamburger — space that was already empty — so listening mode gets a
+// cue without taking a point from the text.
+//
+// A sine wave was tried here and read as decoration rather than audio: it's
+// smooth and periodic, and speech is neither. What makes a meter look like
+// sound is IRREGULARITY — each bar moving to its own target on its own
+// clock. So every bar runs an independent loop with a randomised height and
+// a randomised duration, which is why it never settles into a pattern.
+//
+// It is not driven by the actual signal. True levels would mean attaching an
+// MTAudioProcessingTap to the player item and streaming RMS to JS — real
+// work for something purely decorative. Worth doing only if this doesn't
+// convince.
+const BAR_COUNT = 13;
+const BAR_W = ui(5);
+const BAR_GAP = ui(4);
+const BAR_H = ui(22);
+const BAR_IDLE = 0.28;          // resting scale when paused
+
+function AudioWave({ color, visible, active }) {
+  const bars = useRef(
+    Array.from({ length: BAR_COUNT }, () => new Animated.Value(BAR_IDLE))
+  ).current;
+  const runningRef = useRef(false);
+
+  useEffect(() => {
+    runningRef.current = active;
+    if (!active) {
+      // Settle gently rather than snapping — an abrupt collapse on pause
+      // looks like a glitch.
+      bars.forEach(b => {
+        Animated.timing(b, {
+          toValue: BAR_IDLE, duration: 220, easing: Easing.out(Easing.quad),
+          useNativeDriver: true,
+        }).start();
+      });
+      return;
+    }
+
+    // Each bar re-targets independently and forever; the recursion is what
+    // keeps it from ever looking periodic.
+    const step = (b) => {
+      if (!runningRef.current) return;
+      Animated.timing(b, {
+        toValue: 0.22 + Math.random() * 0.78,
+        duration: 110 + Math.random() * 190,
+        easing: Easing.inOut(Easing.quad),
+        useNativeDriver: true,
+      }).start(({ finished }) => { if (finished) step(b); });
+    };
+    bars.forEach((b, i) => setTimeout(() => step(b), i * 40));  // stagger the start
+
+    return () => { runningRef.current = false; };
+  }, [active, bars]);
+
+  if (!visible) return null;
+
+  return (
+    <View style={styles.waveRow} pointerEvents="none">
+      {bars.map((b, i) => (
+        <Animated.View
+          key={i}
+          style={[styles.waveBar, { backgroundColor: color, transform: [{ scaleY: b }] }]}
+        />
+      ))}
+    </View>
+  );
+}
 
 export default function EditorScreen() {
   const { id, edit } = useLocalSearchParams();
@@ -125,33 +218,80 @@ export default function EditorScreen() {
   const [progress, setProgress] = useState(0);
   const [voiceOn, setVoiceOn] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
-  // Listen mode: mounted stays true after first open so playback state
-  // survives closing the card (close ≠ stop; lock-screen controls take over).
-  const [listenMounted, setListenMounted] = useState(false);
-  const [listenOpen, setListenOpen] = useState(false);
   const bodyInputRef = useRef(null);
 
-  function openListen() {
-    if (voiceOn) stopVoice();   // mic session and playback session conflict
-    setListenMounted(true);
-    setListenOpen(true);
-  }
+  // ── Listen mode ──
+  //
+  // The HUD does double duty. Presenting: A− / scroll progress / A+ and the
+  // mic. Listening: back-15 / audio scrubber / forward-15 and the rate.
+  // Which one you're in is carried by the transport button's icon and by the
+  // band — which is HIDDEN while listening, because "this is the line I'm
+  // about to speak" is a claim the app can't make when it's the one
+  // speaking.
+  const listen = useListen({ id, title, body }, settings.wpm || 130, !!note);
+  const listening = listen.playing || listen.busy || listen.phase === 'paused';
 
-  // The sheet PULLS the band position at the moment it needs it (load,
-  // card open, or the "Start at band" button) — never a stale snapshot.
-  function currentBandOffset() {
-    const line = bandLine();
-    if (__DEV__) {
-      const denom = Math.max(1, contentHRef.current - viewportHRef.current);
-      const proportionalChar = Math.round((scrollYRef.current / denom) * body.length);
-      console.log('[listen] bandOffset pull: scrollY', Math.round(scrollYRef.current),
-        'of contentH', Math.round(contentHRef.current),
-        '| band line start', line ? line.start : null, 'of', body.length, 'chars',
-        '| proportional estimate', proportionalChar,
-        '| lineStarts entries', lineStartsRef.current.length);
-    }
-    return line ? line.start : 0;
+  // Scrubber drag on the HUD track. Same capture-phase approach as before:
+  // a JS PanResponder must claim the touch before the ScrollView behind it.
+  const [hudScrubbing, setHudScrubbing] = useState(false);
+  const [hudScrubT, setHudScrubT] = useState(0);
+  const hudScrubbingRef = useRef(false);
+  const hudScrubTRef = useRef(0);
+  const hudBarRef = useRef({ x: 0, w: 0 });
+  const listenRef = useRef(listen);
+  const listeningRef = useRef(false);
+  useEffect(() => { listenRef.current = listen; });
+  useEffect(() => { listeningRef.current = listening; }, [listening]);
+
+  const hudPan = useRef(null);
+  if (!hudPan.current) {
+    const canScrub = () => listenRef.current.duration > 0 && listeningRef.current;
+    const applyX = (pageX) => {
+      const { x, w } = hudBarRef.current;
+      if (!(w > 0)) return;
+      const frac = Math.max(0, Math.min(1, (pageX - x) / w));
+      const t = frac * listenRef.current.duration;
+      hudScrubTRef.current = t;
+      setHudScrubT(t);
+    };
+    const finish = () => {
+      if (!hudScrubbingRef.current) return;
+      const cap = listenRef.current.rendered > 0
+        ? listenRef.current.rendered - 0.5
+        : listenRef.current.duration;
+      const t = Math.min(hudScrubTRef.current, Math.max(0, cap));
+      hudScrubbingRef.current = false;
+      setHudScrubbing(false);
+      listenRef.current.seek(t);
+      listenRef.current.savePosition(t);
+    };
+    hudPan.current = PanResponder.create({
+      onStartShouldSetPanResponder: canScrub,
+      onMoveShouldSetPanResponder: canScrub,
+      onStartShouldSetPanResponderCapture: canScrub,
+      onMoveShouldSetPanResponderCapture: canScrub,
+      onPanResponderTerminationRequest: () => false,
+      onShouldBlockNativeResponder: () => true,
+      onPanResponderGrant: (e) => {
+        if (!canScrub()) return;
+        const { pageX, locationX } = e.nativeEvent;
+        hudBarRef.current.x = pageX - locationX;
+        hudScrubbingRef.current = true;
+        setHudScrubbing(true);
+        applyX(pageX);
+      },
+      onPanResponderMove: (e, g) => { if (hudScrubbingRef.current) applyX(g.moveX); },
+      onPanResponderRelease: finish,
+      onPanResponderTerminate: finish,
+    });
   }
+  // iOS's interactive-pop recognizer listens near the left screen edge, and
+  // a native recognizer always beats a JS PanResponder — so dragging the
+  // scrubber would swipe the whole screen back instead of seeking. Suspend
+  // the stack gesture while listening; it returns when playback stops.
+  useEffect(() => {
+    navigation.setOptions({ gestureEnabled: !listening });
+  }, [listening, navigation]);
 
   // ── The single scroll world ──
   const scrollRef = useRef(null);        // the one ScrollView
@@ -332,11 +472,46 @@ export default function EditorScreen() {
 
   // ── Shared geometry (both modes) ──
   const hudClear = insets.bottom + ui(76);
-  const pillW = Math.min(width - ui(120), 340);
+  // Each flanking control is a 48pt circle plus a 10pt gap. Without
+  // accounting for the second one the pill overflows on narrower phones.
+  const pillW = Math.min(width - ui(120) - (listen.stReady ? ui(58) : 0), 340);
+  // Estimated speaking time for the whole note, so presentation mode can
+  // show the same readout as listening: how far into the talk you are at
+  // your own pace. Keeps the HUD's vertical rhythm identical in both modes —
+  // the track sits at the same height either way.
+  const speechSeconds = (() => {
+    const w = body?.trim() ? body.trim().split(/\s+/).length : 0;
+    return (w / (settings.wpm || 130)) * 60;
+  })();
+
+  // ── One theme colour through the whole HUD ──
+  //
+  // The band's colour is the app's accent as far as the reader is concerned,
+  // so the transport, the mic, the scrubber and the meter all take it. That
+  // carries a single splash of colour through the controls instead of two
+  // competing accents.
+  //
+  // The band is drawn as a 15% fill with a 75% border. 15% is right behind
+  // text and hopeless on a 6pt bar, so anything small uses the border alpha:
+  // same hue, actually visible.
+  const themeColor = (settings.bandColor && settings.bandColor !== 'clear')
+    ? bandBorderColor(settings.bandColor) : colors.accent;
+  // Between the band's two alphas. The band's 15% fill looked too light on
+  // the bar and the 75% border looked too strong — which is expected: the
+  // band is a large area WITH a border, behind dark text, while the bar is
+  // 6pt of unoutlined colour on a grey track. Same value, very different
+  // perceived weight. BAR_ALPHA is the dial.
   const progressColor = (settings.bandColor && settings.bandColor !== 'clear')
-    ? settings.bandColor : colors.accent;
+    ? bandAlphaColor(settings.bandColor, BAR_ALPHA) : colors.accent;
+  // The transport and mic deliberately keep the APP accent rather than the
+  // band colour. Tinting them tracked the band well enough at rest but the
+  // filled/active state needed per-colour contrast tuning to stay legible,
+  // and the progress bar already carries the band colour through the HUD.
 
   const lineHeight = FONT_SIZES[fontIndex] * 1.55;
+  // Hidden while listening: the band means "the line I'm about to speak",
+  // which is false when the app is the one speaking. It doubles as the mode
+  // cue — band on, you're presenting; band off, you're listening.
   const bandHeight = settings.bandLines * lineHeight;
   const contentTop = insets.top + TOP_BAR_H + TITLE_BAR_H;
   const bandTop = height * (settings.bandPositionPct / 100) - bandHeight / 2;
@@ -355,18 +530,6 @@ export default function EditorScreen() {
     paddingLeft: insets.left + padX,
     paddingRight: insets.right + padX,
   };
-
-  function bandFillColor(hex) {
-    if (hex === 'clear') return 'transparent';
-    const r = parseInt(hex.slice(1, 3), 16);
-    const g = parseInt(hex.slice(3, 5), 16);
-    const b = parseInt(hex.slice(5, 7), 16);
-    return `rgba(${r},${g},${b},0.15)`;
-  }
-  function bandBorderColor(hex) {
-    if (hex === 'clear') return '#94a3b8';
-    return hex + 'BF';
-  }
 
   // ── Voice follow ──
   // Build a normalized word list of the script (word -> char offset).
@@ -408,6 +571,150 @@ export default function EditorScreen() {
     }
     return line;
   }
+
+  // ── Text auto-follow ──
+  //
+  // Scrolls the note so the paragraph being spoken stays on screen. The old
+  // start-at-the-band feature ran the opposite direction — scroll position →
+  // audio time — and a wrong answer there put playback in the wrong place,
+  // which was glaring. This direction is forgiving: a line off is barely
+  // noticeable, and every cue re-anchors, so nothing accumulates.
+  //
+  // Cues carry their opening WORDS rather than a character offset, because
+  // offsets index the sanitized text sent to the synthesizer while the line
+  // map indexes the body on screen. Matching words sidesteps that entirely.
+  const followRef = useRef(true);           // engaged until the reader scrolls
+  const [following, setFollowing] = useState(true);
+  const lastCueRef = useRef(null);
+  const cueYRef = useRef(null);        // content-y of the current cue's first line
+  const nextYRef = useRef(null);       // …and of the next cue's, bounding the paragraph
+  const autoScrollingRef = useRef(false);
+
+  // Locate a cue's words in the script and return the character offset.
+  // Searches forward from the previous match so repeated phrases resolve to
+  // the right occurrence.
+  function offsetForCueText(text, fromOffset) {
+    const words = scriptWordsRef.current;
+    if (!words.length) return -1;
+    const needle = String(text).toLowerCase().match(/[a-z0-9']+/g);
+    if (!needle || !needle.length) return -1;
+    const probe = needle.slice(0, 4);      // enough to be unique, short enough to survive normalisation
+    let startIdx = words.findIndex(w => w.offset >= fromOffset);
+    if (startIdx < 0) startIdx = 0;
+    for (let pass = 0; pass < 2; pass++) {
+      const from = pass === 0 ? startIdx : 0;   // second pass: wrap and search the whole script
+      for (let i = from; i <= words.length - probe.length; i++) {
+        let ok = true;
+        for (let j = 0; j < probe.length; j++) {
+          if (words[i + j].w !== probe[j]) { ok = false; break; }
+        }
+        if (ok) return words[i].offset;
+      }
+    }
+    return -1;
+  }
+
+  function lineYForOffset(offset) {
+    const ls = lineStartsRef.current;
+    if (!ls.length || offset < 0) return null;
+    const line = ls.find(l => offset >= l.start && offset <= l.end)
+      || ls.reduce((a, b) => (Math.abs(b.start - offset) < Math.abs(a.start - offset) ? b : a), ls[0]);
+    return line ? line.y : null;
+  }
+
+  // Where to scroll so content-y `y` sits near the top of the viewport.
+  //
+  // scrollY === line.y puts that line at clampedBandTop (the content's top
+  // padding is clampedBandTop − contentTop, so the two cancel). To place it
+  // at screen position D instead, scroll to y + clampedBandTop − D.
+  function scrollTargetFor(y) {
+    const viewH = viewportHRef.current || height;
+    const desiredScreenY = contentTop + viewH * FOLLOW_TOP_FRAC;
+    return Math.max(0, y + clampedBandTop - desiredScreenY);
+  }
+
+  function scrollFollow(target) {
+    if (!scrollRef.current) return;
+    autoScrollingRef.current = true;
+    scrollRef.current.scrollTo({ y: target, animated: true });
+    setTimeout(() => { autoScrollingRef.current = false; }, 600);
+  }
+
+  // Runs on every progress tick.
+  //
+  // FONT SIZE is what makes this more than a jump-per-paragraph. Runway is
+  // measured in pixels but a paragraph's height scales with type size: at
+  // the smallest size a paragraph fits easily below the start position, at
+  // the largest it can be two screens tall — and then the voice walks off
+  // the bottom before the next cue arrives. So when a paragraph is taller
+  // than the runway, creep through it in proportion to how far into the
+  // paragraph the audio is. When it fits, place it once and leave it alone.
+  useEffect(() => {
+    if (!listen.playing || !followRef.current) return;
+    const { cue, next } = listen.cueSpanAt(listen.elapsed);
+    if (!cue) return;
+
+    if (!scriptWordsRef.current.length) buildScriptWords();
+    if (!lineStartsRef.current.length) computeLineStarts();
+
+    if (cue !== lastCueRef.current) {
+      lastCueRef.current = cue;
+      cueYRef.current = lineYForOffset(offsetForCueText(cue.text, 0));
+      nextYRef.current = null;
+      if (__DEV__) {
+        console.log('[follow] cue @', cue.time.toFixed(1) + 's → y',
+          cueYRef.current == null ? 'NO MATCH' : Math.round(cueYRef.current),
+          '|', cue.text.slice(0, 28));
+      }
+    }
+    if (nextYRef.current == null && next) {
+      nextYRef.current = lineYForOffset(offsetForCueText(next.text, 0));
+    }
+
+    const y0 = cueYRef.current;
+    if (y0 == null) return;
+
+    const viewH = viewportHRef.current || height;
+    const runway = Math.max(lineHeight, viewH * (1 - FOLLOW_TOP_FRAC) - lineHeight * 1.5);
+    const y1 = nextYRef.current;
+    const span = (y1 != null && y1 > y0) ? y1 - y0 : 0;
+
+    let advance = 0;
+    if (span > runway) {
+      const t0 = cue.time;
+      const t1 = next ? next.time : t0 + 8;
+      const frac = t1 > t0
+        ? Math.max(0, Math.min(1, (listen.elapsed - t0) / (t1 - t0)))
+        : 0;
+      advance = frac * (span - runway);
+    }
+
+    const target = scrollTargetFor(y0 + advance);
+    // Move in line-sized steps: creeping a few pixels every tick would
+    // shimmer, and a jump under one line isn't worth the animation.
+    if (Math.abs(target - scrollYRef.current) < lineHeight * 0.6) return;
+    scrollFollow(target);
+  }, [listen.elapsed, listen.playing, listen.cueCount]);
+
+  // Starting playback re-anchors AND re-engages. Disengaging is a
+  // within-session choice ("let me look elsewhere"), not a standing one —
+  // without this, one stray scroll disabled following until the meter was
+  // tapped, which is easy to miss and looks like the feature is broken.
+  useEffect(() => {
+    lastCueRef.current = null;
+    cueYRef.current = null;
+    nextYRef.current = null;
+    if (listen.playing) {
+      followRef.current = true;
+      setFollowing(true);
+    }
+  }, [listen.playing]);
+
+  // Editing invalidates both maps — offsets would point into stale text.
+  useEffect(() => {
+    scriptWordsRef.current = [];
+    lastCueRef.current = null;
+  }, [body]);
 
   // Find the script-word index that matches wherever the reader is currently
   // scrolled, so voice-follow starts from the band — not the top of the note.
@@ -912,7 +1219,6 @@ export default function EditorScreen() {
         { label: 'Go to top',    icon: 'arrow.up',           onPress: jumpToTop },
         { label: 'Go to bottom', icon: 'arrow.down',         onPress: jumpToBottom },
         { label: 'Edit',         icon: 'square.and.pencil',  onPress: enterEdit },
-        { label: 'Listen',       icon: 'play.circle',        onPress: openListen },
         { label: 'Print',        icon: 'printer',            onPress: handlePrint },
         { label: 'Home',         icon: 'house',              onPress: jumpHome },
         { label: 'Settings',     icon: 'gearshape',          onPress: () => router.push('/settings') },
@@ -942,7 +1248,25 @@ export default function EditorScreen() {
             <Text style={[styles.topBarText, { color: colors.text }]}> Back</Text>
           </TouchableOpacity>
         </View>
-        <View style={styles.topBarCenter} />
+        <View style={styles.topBarCenter}>
+          {/* The meter doubles as the follow control: dimmed means the text
+              has stopped following the audio (you scrolled away), and a tap
+              re-engages it. Reuses a graphic that's already there rather
+              than adding another button. */}
+          <TouchableOpacity
+            onPress={() => {
+              if (!listening) return;
+              followRef.current = true;
+              setFollowing(true);
+              lastCueRef.current = null;      // force a re-anchor on the next tick
+            }}
+            disabled={!listening || following}
+            hitSlop={{ top: 10, bottom: 10, left: 16, right: 16 }}
+            style={{ opacity: following ? 1 : 0.35 }}
+          >
+            <AudioWave color={colors.accent} visible={listening} active={listen.playing} />
+          </TouchableOpacity>
+        </View>
         <View style={styles.topBarSideEnd}>
           <TouchableOpacity
             style={styles.hamburgerBtn}
@@ -983,8 +1307,13 @@ export default function EditorScreen() {
       </View>
 
       {/* Band overlay + fades — present mode only. Absolute overlays: their
-          presence/absence never affects the text layout underneath. */}
-      {!editing && (
+          presence/absence never affects the text layout underneath.
+          Hidden for the whole LISTENING session, not just while sound is
+          coming out. The band means "the line I'm about to say", which is
+          false whenever the app owns the reading — and flickering it back on
+          every pause made it unclear which mode you were in. It returns on
+          long-press, which is the deliberate exit back to presenting. */}
+      {!editing && !listening && (
         <>
           <View pointerEvents="none" style={[styles.band, {
             top: clampedBandTop, height: bandHeight,
@@ -1020,7 +1349,17 @@ export default function EditorScreen() {
             if (y > 0) scrollRef.current?.scrollTo({ y: Math.min(y, Math.max(0, h)), animated: false });
           }
         }}
-        onScrollBeginDrag={() => { editPinYRef.current = null; }}
+        onScrollBeginDrag={() => {
+          editPinYRef.current = null;
+          // A deliberate drag means the reader wants to look elsewhere —
+          // fighting them is the fastest way to make this feel broken.
+          // Guarded against our own animated scrollTo, which is not a drag
+          // but can overlap one.
+          if (!autoScrollingRef.current && followRef.current) {
+            followRef.current = false;
+            setFollowing(false);
+          }
+        }}
         onScroll={e => {
           const y = e.nativeEvent.contentOffset.y;
           scrollYRef.current = y;
@@ -1057,33 +1396,129 @@ export default function EditorScreen() {
         )}
       </ScrollView>
 
-      {/* Floating HUD — A− · progress · A+ and voice-follow. Present only. */}
+      {/* Floating HUD — presenting: A− · scroll · A+ · mic.
+          Listening: −15 · scrubber · +15 · rate. */}
       {!editing && (
         <View pointerEvents="box-none" style={[styles.hudWrap, { bottom: insets.bottom + ui(12) }]}>
-          <View style={[styles.hudPill, { width: pillW, backgroundColor: colors.surface, borderColor: colors.border }]}>
+          {/* Audio transport — a floating circle mirroring the mic, so the
+              pill sits centred between two matching controls. The icon is
+              the state: play means stopped, pause means playing. */}
+          {listen.stReady && (
             <TouchableOpacity
-              onPress={() => setFontIndex(i => Math.max(0, i - 1))}
-              disabled={fontIndex === 0}
-              hitSlop={{ top: 10, bottom: 10, left: 6, right: 6 }}
-              style={{ opacity: fontIndex === 0 ? 0.3 : 1 }}
+              style={[styles.hudRound, {
+                backgroundColor: listening ? colors.accent : colors.surface,
+                borderColor: listening ? colors.accentBorder : colors.border,
+              }]}
+              onPress={() => {
+                if (listen.playing) { listen.pause(); return; }
+                if (voiceOn) stopVoice();     // mic and playback sessions conflict
+                listen.play();
+              }}
+              onLongPress={() => { if (listening) listen.stop(); }}
+              delayLongPress={450}
+              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
             >
-              <Text style={[styles.hudAa, { color: colors.text }]}>A−</Text>
+              {listen.busy
+                ? <SymbolView name="hourglass" size={ui(20)} tintColor={colors.accentText} type="monochrome" />
+                : <SymbolView
+                    name={listen.playing ? 'pause.fill' : 'play.fill'}
+                    size={ui(20)}
+                    tintColor={listening ? colors.accentText : colors.textMuted}
+                    type="monochrome"
+                  />}
             </TouchableOpacity>
-            <View style={[styles.hudTrack, { backgroundColor: colors.border }]}>
-              <View style={[styles.hudFill, { width: `${progress}%`, backgroundColor: progressColor }]} />
-            </View>
+          )}
+
+          <View style={[styles.hudPill, { width: pillW, backgroundColor: colors.surface, borderColor: colors.border }]}>
+            {/* Left: font down, or skip back */}
             <TouchableOpacity
-              onPress={() => setFontIndex(i => Math.min(FONT_SIZES.length - 1, i + 1))}
-              disabled={fontIndex === FONT_SIZES.length - 1}
+              onPress={() => listening ? listen.nudge(-15) : setFontIndex(i => Math.max(0, i - 1))}
+              disabled={!listening && fontIndex === 0}
               hitSlop={{ top: 10, bottom: 10, left: 6, right: 6 }}
-              style={{ opacity: fontIndex === FONT_SIZES.length - 1 ? 0.3 : 1 }}
+              style={{ opacity: (!listening && fontIndex === 0) ? 0.3 : 1 }}
             >
-              <Text style={[styles.hudAa, { color: colors.text }]}>A+</Text>
+              {listening
+                ? <SymbolView name="gobackward.15" size={ui(25)} tintColor={colors.text} type="monochrome" />
+                : <Text style={[styles.hudAa, { color: colors.text }]}>A−</Text>}
+            </TouchableOpacity>
+
+            {/* Centre: scroll progress, or the audio scrubber with elapsed
+                time sitting on it — the one readout worth the space. */}
+            <View
+              style={styles.hudTrackWrap}
+              {...(listening ? hudPan.current.panHandlers : {})}
+            >
+              <View
+                style={[styles.hudTrack, { backgroundColor: colors.border }]}
+                onLayout={e => { hudBarRef.current.w = e.nativeEvent.layout.width; }}
+              >
+                {listening && listen.rendered > 0 && listen.duration > 0 && (
+                  <View style={[styles.hudBuffered, {
+                    backgroundColor: themeColor,
+                    width: `${Math.min(100, (listen.rendered / listen.duration) * 100)}%`,
+                  }]} />
+                )}
+                <View style={[styles.hudFill, {
+                  width: listening
+                    ? `${listen.duration ? Math.min(100, ((hudScrubbing ? hudScrubT : listen.elapsed) / listen.duration) * 100) : 0}%`
+                    : `${progress}%`,
+                  backgroundColor: progressColor,
+                }]} />
+              </View>
+              {/* A handle, so the track reads as draggable rather than as a
+                  readout. Grows while dragging for finger feedback. */}
+              {listening && listen.duration > 0 && (
+                <View
+                  pointerEvents="none"
+                  style={[styles.hudThumb, {
+                    left: `${Math.min(100, ((hudScrubbing ? hudScrubT : listen.elapsed) / listen.duration) * 100)}%`,
+                    backgroundColor: themeColor,
+                    borderColor: colors.surface,
+                    transform: [{ scale: hudScrubbing ? 1.35 : 1 }],
+                  }]}
+                />
+              )}
+              <Text style={[styles.hudTime, {
+                color: hudScrubbing ? themeColor : colors.textMuted,
+              }]}>
+                {listening
+                  ? (listen.busy && listen.synthPct > 0
+                      ? `${Math.round(listen.synthPct * 100)}%`
+                      : fmt(hudScrubbing ? hudScrubT : listen.elapsed))
+                  : fmt((progress / 100) * speechSeconds)}
+              </Text>
+            </View>
+
+            {/* Right: font up, or skip forward */}
+            <TouchableOpacity
+              onPress={() => listening ? listen.nudge(15) : setFontIndex(i => Math.min(FONT_SIZES.length - 1, i + 1))}
+              disabled={!listening && fontIndex === FONT_SIZES.length - 1}
+              hitSlop={{ top: 10, bottom: 10, left: 6, right: 6 }}
+              style={{ opacity: (!listening && fontIndex === FONT_SIZES.length - 1) ? 0.3 : 1 }}
+            >
+              {listening
+                ? <SymbolView name="goforward.15" size={ui(25)} tintColor={colors.text} type="monochrome" />
+                : <Text style={[styles.hudAa, { color: colors.text }]}>A+</Text>}
             </TouchableOpacity>
           </View>
-          {SHOW_VOICE_PLACEHOLDER && (
+
+          {/* Right circle: mic while presenting, playback rate while
+              listening. The mic is unusable during playback anyway — the two
+              audio sessions conflict — so this repurposes a dead control
+              rather than stealing a live one. */}
+          {listening ? (
             <TouchableOpacity
-              style={[styles.hudMic, {
+              style={[styles.hudRound, { backgroundColor: colors.surface, borderColor: colors.border }]}
+              onPress={listen.cycleRate}
+              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            >
+              <Text style={[styles.hudRate, { color: colors.text }]} numberOfLines={1}>
+                {listen.playbackRate}×
+              </Text>
+            </TouchableOpacity>
+          ) : SHOW_VOICE_PLACEHOLDER && (
+            <TouchableOpacity
+              style={[styles.hudRound, {
                 backgroundColor: voiceOn ? colors.accent : colors.surface,
                 borderColor: voiceOn ? colors.accentBorder : colors.border,
               }]}
@@ -1124,19 +1559,6 @@ export default function EditorScreen() {
       {/* Popover menu — items depend on mode. */}
       {renderMenu(menuItems)}
 
-      {/* Listen mode player — mounted after first open; card visibility
-          toggles with listenOpen while playback continues underneath. */}
-      {listenMounted && (
-        <ListenSheet
-          open={listenOpen}
-          note={{ id, title, body }}
-          wpm={settings.wpm || 130}
-          colors={colors}
-          insets={insets}
-          getBandOffset={currentBandOffset}
-          onClose={() => setListenOpen(false)}
-        />
-      )}
     </View>
   );
 }
@@ -1161,6 +1583,14 @@ const styles = StyleSheet.create({
   topBarChevron: { fontSize: ui(20), lineHeight: ui(22), marginRight: 1 },
   topBarText:    { fontSize: ui(16), lineHeight: ui(22) },
   topBarCenter:  { flex: 1, alignItems: 'center', justifyContent: 'flex-end' },
+  // Clip to one period so the doubled strip underneath is invisible.
+  waveRow: {
+    flexDirection: 'row', alignItems: 'center',
+    gap: BAR_GAP, height: BAR_H, marginBottom: ui(2),
+  },
+  // scaleY grows about the centre, so bars expand both ways — the symmetric
+  // look of a voice meter rather than a bar chart.
+  waveBar: { width: BAR_W, height: BAR_H, borderRadius: BAR_W / 2 },
   hamburgerBtn:  { padding: ui(4), borderRadius: ui(7) },
   hamburgerIcon: { width: ui(22), height: ui(16), justifyContent: 'space-between' },
   hamburgerLine: { height: ui(2), width: '100%', borderRadius: ui(1) },
@@ -1238,9 +1668,44 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.12, shadowRadius: 8, elevation: 5,
   },
   hudAa:    { fontSize: ui(15), fontWeight: '700' },
-  hudTrack: { flex: 1, height: ui(6), borderRadius: ui(3), marginHorizontal: ui(14), overflow: 'hidden' },
+  // The track sits in a taller wrapper so a drag has something to grab —
+  // 6pt is fine to look at and hopeless to hit.
+  // Extra room underneath for the elapsed readout; the track itself stays
+  // vertically centred on the pill.
+  hudTrackWrap: {
+    flex: 1, marginHorizontal: ui(12), justifyContent: 'center',
+    paddingTop: ui(4), paddingBottom: ui(22),
+  },
+  hudTrack: { height: ui(6), borderRadius: ui(3), overflow: 'hidden' },
   hudFill:  { height: '100%', borderRadius: ui(3) },
-  hudMic: {
+  // Rendered-but-unplayed, behind the played fill — the same convention
+  // every video player uses, so it needs no explanation.
+  hudBuffered: { position: 'absolute', left: 0, top: 0, bottom: 0, borderRadius: ui(3), opacity: 0.3 },
+  // top = track centre (paddingTop + half the 6pt track) minus half the
+  // thumb, so it stays centred if the padding above ever changes again.
+  hudThumb: {
+    position: 'absolute', top: ui(4) + ui(3) - ui(7),
+    width: ui(14), height: ui(14), borderRadius: ui(7),
+    marginLeft: ui(-7), borderWidth: 2,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.2, shadowRadius: 2, elevation: 3,
+  },
+  // Sits BELOW the track rather than across it, so the bar stays a clean
+  // line and the reading has its own space.
+  // Anchored by `bottom`, so a larger size grows UPWARD into the gap under
+  // the track rather than pushing the pill taller. Tablets (and the Mac,
+  // which runs as an iPad app) get a bigger step: the pill is capped at 340
+  // wide, so on a large screen the readout otherwise looks lost in it.
+  hudTime: {
+    position: 'absolute', left: 0, right: 0, bottom: ui(-3),
+    textAlign: 'center', fontSize: ui(IS_TABLET ? 16 : 12), fontWeight: '800',
+    fontVariant: ['tabular-nums'],
+  },
+  hudRate: { fontSize: ui(15), fontWeight: '700' },
+
+  // Shared by the audio transport (left) and the mic (right) so the pair
+  // reads as a matched set on either side of the pill.
+  hudRound: {
     width: ui(48), height: ui(48), borderRadius: ui(24), borderWidth: 1,
     alignItems: 'center', justifyContent: 'center',
     shadowColor: '#000', shadowOffset: { width: 0, height: 3 },
