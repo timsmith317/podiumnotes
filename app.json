@@ -2,7 +2,7 @@
   "expo": {
     "name": "Podium Notes",
     "slug": "podiumnotes",
-    "version": "1.0.0",
+    "version": "2.0.0",
     "orientation": "default",
     "icon": "./assets/images/icon.png",
     "scheme": "podiumnotes",
@@ -73,6 +73,7 @@
     "plugins": [
       "expo-router",
       "expo-document-picker",
+      "expo-sharing",
       [
         "expo-splash-screen",
         {
