@@ -41,19 +41,26 @@
 // draw App Review questions. Local development uses plain `expo start`. (This
 // matches The Filter List, which also ships without dev-client.)
 //
-// FILE SHARING (dev and, temporarily, preview): these variants expose their
-// Documents folder
-// in the Files app (UIFileSharingEnabled + LSSupportsOpeningDocumentsInPlace)
-// so the ~400 MB Supertonic model directory can be dragged onto the device
-// without the Xcode container dance. These keys are deliberately NOT applied
-// to preview or production — an exposed Documents folder in a shipping app
-// lets anyone browse a user's cached sermon audio, and App Review reasonably
-// asks why a notes app needs it.
+// FILE SHARING: removed. Dev and preview used to expose their Documents
+// folder so the ~400 MB speech model could be dragged onto each device. The
+// model now ships inside the app (plugins/withSpeechModel.js), so nothing is
+// hand-copied and no variant needs a browsable Documents folder — which is
+// just as well, since an exposed Documents folder lets anyone holding the
+// device read a user's cached sermon audio.
 //
 // IMPORTANT (local builds): there is one ios/ folder, so switching variants
 // requires a clean prebuild each time, e.g.:
 //   Preview:  APP_VARIANT=preview npx expo prebuild --clean -p ios && APP_VARIANT=preview npx expo run:ios --configuration Release --device
 export default ({ config }) => {
+  // The speech model is bundled into EVERY variant, production included, so
+  // this is appended before the variant early-return below. See
+  // plugins/withSpeechModel.js for why it's a build phase and why the model
+  // isn't in git.
+  config = {
+    ...config,
+    plugins: [...(config.plugins ?? []), './plugins/withSpeechModel'],
+  };
+
   const variant = process.env.APP_VARIANT;
   const baseId = config.ios?.bundleIdentifier;
   const basePkg = config.android?.package;
@@ -65,21 +72,12 @@ export default ({ config }) => {
       schemeSuffix: '-dev',
       name: `Dev · ${config.name}`,
       icon: './assets/images/icon-dev.png',
-      filesApp: true,   // expose Documents in Files (see header) — dev only
     },
     preview: {
       suffix: '.preview',
       schemeSuffix: '-preview',
       name: `Preview · ${config.name}`,
       icon: config.icon, // use the production app.json icon so Preview shows the real on-device look
-      // TEMPORARY — remove once the speech model ships with the app rather
-      // than being hand-copied. Preview has its own bundle ID and therefore
-      // its own empty container, so without this there is no way to get the
-      // ~400MB model onto an untethered build short of Xcode's Replace
-      // Container. Production must NEVER carry these keys: an exposed
-      // Documents folder lets anyone with the device browse a user's cached
-      // sermon audio.
-      filesApp: true,
     },
   };
 
@@ -94,15 +92,6 @@ export default ({ config }) => {
     ios: {
       ...config.ios,
       bundleIdentifier: `${baseId}${v.suffix}`,
-      // Spread the base infoPlist first so app.json keeps ownership of
-      // everything else; only the two sharing keys are added, and only when
-      // the variant asks for them.
-      infoPlist: {
-        ...config.ios?.infoPlist,
-        ...(v.filesApp
-          ? { UIFileSharingEnabled: true, LSSupportsOpeningDocumentsInPlace: true }
-          : {}),
-      },
       entitlements: {
         ...config.ios?.entitlements,
         'com.apple.security.application-groups': [`group.${baseId}${v.suffix}`],

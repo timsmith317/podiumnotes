@@ -43,3 +43,10 @@ yarn-error.*
 # Speech model — ~400MB of ONNX weights, copied into the app at build
 # time by plugins/withSpeechModel.js. Kept out of git deliberately.
 /assets/model
+
+# .easignore REPLACES .gitignore for EAS uploads, so everything above is
+# required. The negation must come last to win: EAS excludes by gitignore
+# rules, not by whether a file is committed, so without this the cloud
+# build would produce an app with no voice.
+!assets/model
+!assets/model/**
