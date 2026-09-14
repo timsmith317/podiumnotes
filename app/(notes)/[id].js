@@ -670,14 +670,32 @@ export default function EditorScreen() {
     if (y0 == null) return;
 
     const viewH = viewportHRef.current || height;
-    const runway = Math.max(lineHeight, viewH * (1 - FOLLOW_TOP_FRAC) - lineHeight * 1.5);
-    const y1 = nextYRef.current;
+    // The HUD floats over the bottom of the viewport, so the usable runway is
+    // shorter than the viewport by that much. Without subtracting it the
+    // creep stopped with the closing lines sitting behind the controls —
+    // scrolled into the viewport, but not into view.
+    const runway = Math.max(
+      lineHeight,
+      viewH * (1 - FOLLOW_TOP_FRAC) - hudClear - lineHeight * 1.5
+    );
+
+    // Every cue is bounded by the next one — except the last, which has no
+    // successor. Left unbounded its span was zero, so the creep never
+    // engaged: the final paragraph's first line went to the top and the text
+    // below it was never scrolled into view, even though the audio kept
+    // reading it. Bound the last cue by the end of the TEXT and the end of
+    // the AUDIO instead.
+    const ls = lineStartsRef.current;
+    const lastLine = ls.length ? ls[ls.length - 1] : null;
+    const textEndY = lastLine ? lastLine.y + lastLine.h : y0;
+
+    const t0 = cue.time;
+    const y1 = next ? nextYRef.current : textEndY;
+    const t1 = next ? next.time : (listen.duration || t0 + 8);
     const span = (y1 != null && y1 > y0) ? y1 - y0 : 0;
 
     let advance = 0;
     if (span > runway) {
-      const t0 = cue.time;
-      const t1 = next ? next.time : t0 + 8;
       const frac = t1 > t0
         ? Math.max(0, Math.min(1, (listen.elapsed - t0) / (t1 - t0)))
         : 0;
@@ -690,6 +708,21 @@ export default function EditorScreen() {
     if (Math.abs(target - scrollYRef.current) < lineHeight * 0.6) return;
     scrollFollow(target);
   }, [listen.elapsed, listen.playing, listen.cueCount]);
+
+  // Reaching the end returns the note to the top. Wherever the last cue
+  // anchored is an arbitrary-looking spot, and what follows finishing a note
+  // is almost always playing it again, presenting it, or putting it away —
+  // all of which start from the beginning.
+  useEffect(() => {
+    if (listen.phase !== 'finished') return;
+    lastCueRef.current = null;
+    cueYRef.current = null;
+    nextYRef.current = null;
+    autoScrollingRef.current = true;
+    scrollRef.current?.scrollTo({ y: 0, animated: true });
+    const t = setTimeout(() => { autoScrollingRef.current = false; }, 700);
+    return () => clearTimeout(t);
+  }, [listen.phase]);
 
   // Starting playback re-anchors AND re-engages. Disengaging is a
   // within-session choice ("let me look elsewhere"), not a standing one —
@@ -718,9 +751,9 @@ export default function EditorScreen() {
   // microphone works, and nothing is transcribed — unguessable without
   // being told.
   //
-  // The payload may arrive as a string or as an object depending on the
-  // module wrapper, so read it defensively and fall back to matching the
-  // message text.
+  // The wrapper forwards the whole payload, so branch on `code` rather than
+  // on error text Apple may reword. The text match stays as a fallback for
+  // any error that reaches here without one.
   function handleVoiceError(payload) {
     let code = '', message = '';
     try {
