@@ -22,6 +22,7 @@
 import ExpoModulesCore
 import AVFoundation
 import MediaPlayer
+import UIKit
 
 public class SpeechPlayerModule: Module {
   // Playback
@@ -1181,15 +1182,35 @@ public class SpeechPlayerModule: Module {
      center.changePlaybackPositionCommand].forEach { $0.removeTarget(nil) }
   }
 
+  // CarPlay, the lock screen and Control Centre all reserve space for
+  // artwork. Without it they draw an empty placeholder, which reads as a
+  // half-finished app next to anything else that plays audio. The icon is
+  // copied into the bundle at build time alongside the speech model.
+  //
+  // Built once and held: MPMediaItemArtwork re-renders on demand through the
+  // closure, and constructing it on every progress tick would be wasteful.
+  private lazy var nowPlayingArtwork: MPMediaItemArtwork? = {
+    guard let url = Bundle.main.resourceURL?.appendingPathComponent("now-playing-artwork.png"),
+          let image = UIImage(contentsOfFile: url.path) else {
+      NSLog("[SpeechPlayer] now-playing artwork missing from bundle")
+      return nil
+    }
+    return MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+  }()
+
   private func pushNowPlaying(playing: Bool) {
     let elapsed = player.map { CMTimeGetSeconds($0.currentTime()) } ?? 0
-    MPNowPlayingInfoCenter.default().nowPlayingInfo = [
+    var info: [String: Any] = [
       MPMediaItemPropertyTitle: currentTitle.isEmpty ? "Podium Notes" : currentTitle,
       MPMediaItemPropertyArtist: "Podium Notes",
       MPMediaItemPropertyPlaybackDuration: duration,
       MPNowPlayingInfoPropertyElapsedPlaybackTime: elapsed,
       MPNowPlayingInfoPropertyPlaybackRate: playing ? Double(playbackRate) : 0.0,
     ]
+    if let art = nowPlayingArtwork {
+      info[MPMediaItemPropertyArtwork] = art
+    }
+    MPNowPlayingInfoCenter.default().nowPlayingInfo = info
   }
 
   private func teardownPlayer(deactivateSession: Bool) throws {

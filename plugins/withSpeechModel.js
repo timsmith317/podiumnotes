@@ -28,6 +28,17 @@ const { withXcodeProject } = require('@expo/config-plugins');
 
 const PHASE_NAME = 'Copy speech model';
 
+// CarPlay, the lock screen and Control Centre reserve space for artwork and
+// draw an empty placeholder without it. The icon rides along in this phase
+// because it has the same requirement — a plain file in the bundle that
+// native code can open by name, which the asset catalogue does not provide.
+// A dedicated file when one exists, the app icon otherwise. They want
+// different compositions: the icon is a bare mark, while artwork on a car
+// screen sits among other apps' covers and has to say which app it is.
+const ARTWORK_SRC = '$SRCROOT/../assets/images/now-playing-artwork.png';
+const ARTWORK_FALLBACK = '$SRCROOT/../assets/images/icon.png';
+const ARTWORK_DEST = 'now-playing-artwork.png';
+
 // Relative to ios/ (Xcode's $SRCROOT for the app target).
 const MODEL_SRC = '$SRCROOT/../assets/model';
 
@@ -49,7 +60,24 @@ const SCRIPT = [
   '# from a previous build.',
   'rsync -a --delete "$SRC/onnx" "$DEST/"',
   'rsync -a --delete "$SRC/voice_styles" "$DEST/"',
+  '# Same reason as the artwork below: rsync -a preserves extended',
+  '# attributes, and signing refuses a bundle that contains them.',
+  'xattr -cr "$DEST/onnx" "$DEST/voice_styles" 2>/dev/null || true',
   'echo "Copied speech model into $DEST"',
+  '',
+  `ART=""`,
+  `if [ -f "${ARTWORK_SRC}" ]; then ART="${ARTWORK_SRC}"; fi`,
+  `if [ -z "$ART" ] && [ -f "${ARTWORK_FALLBACK}" ]; then ART="${ARTWORK_FALLBACK}"; fi`,
+  '',
+  'if [ -n "$ART" ]; then',
+  `  cp "$ART" "$DEST/${ARTWORK_DEST}"`,
+  '  # Signing rejects a bundle containing extended attributes; cp keeps',
+  '  # them, and anything touched by Finder or a download has them.',
+`  xattr -c "$DEST/${ARTWORK_DEST}" 2>/dev/null || true`,
+  `  echo "Copied Now Playing artwork from $ART"`,
+  'else',
+  `  echo "warning: no artwork found; Now Playing will show an empty placeholder"`,
+  'fi',
 ].join('\n');
 
 module.exports = function withSpeechModel(config) {
@@ -57,13 +85,30 @@ module.exports = function withSpeechModel(config) {
     const project = cfg.modResults;
     const target = project.getFirstTarget().uuid;
 
-    // Idempotent: prebuild regenerates the project, but a plain re-run of
-    // the plugin chain must not stack duplicate phases.
+    // REPLACE a phase we already own rather than skipping it.
+    //
+    // Skipping on a name match seemed like the safe idempotent choice, but a
+    // plain `expo prebuild` reuses ios/ — so once the phase existed, every
+    // later edit to this script was silently ignored and the project kept
+    // running the original version. That is a bad failure: the build
+    // succeeds, and what changed simply doesn't happen.
     const phases = project.hash.project.objects.PBXShellScriptBuildPhase || {};
-    const exists = Object.keys(phases).some(
-      (key) => typeof phases[key] === 'object' && phases[key].name === `"${PHASE_NAME}"`
-    );
-    if (exists) return cfg;
+    for (const key of Object.keys(phases)) {
+      const phase = phases[key];
+      if (typeof phase === 'object' && phase.name === `"${PHASE_NAME}"`) {
+        delete project.hash.project.objects.PBXShellScriptBuildPhase[key];
+        delete project.hash.project.objects.PBXShellScriptBuildPhase[`${key}_comment`];
+        // Drop the reference from every target that listed it, or the
+        // project keeps a dangling id.
+        const targets = project.hash.project.objects.PBXNativeTarget || {};
+        for (const tKey of Object.keys(targets)) {
+          const t = targets[tKey];
+          if (typeof t === 'object' && Array.isArray(t.buildPhases)) {
+            t.buildPhases = t.buildPhases.filter((bp) => bp.value !== key);
+          }
+        }
+      }
+    }
 
     project.addBuildPhase(
       [],
