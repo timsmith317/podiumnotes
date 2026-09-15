@@ -44,9 +44,11 @@ yarn-error.*
 # time by plugins/withSpeechModel.js. Kept out of git deliberately.
 /assets/model
 
+# Rendered audio from tools/voice_eval.py — generated output, ~500MB.
+tools/voice_eval_out/
+
 # .easignore REPLACES .gitignore for EAS uploads, so everything above is
 # required. The negation must come last to win: EAS excludes by gitignore
-# rules, not by whether a file is committed, so without this the cloud
-# build would produce an app with no voice.
+# rules, not by whether a file is committed.
 !assets/model
 !assets/model/**

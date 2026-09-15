@@ -43,3 +43,6 @@ yarn-error.*
 # Speech model — ~400MB of ONNX weights, copied into the app at build
 # time by plugins/withSpeechModel.js. Kept out of git deliberately.
 /assets/model
+
+# Rendered audio from tools/voice_eval.py — generated output, ~500MB.
+tools/voice_eval_out/
