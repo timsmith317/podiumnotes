@@ -381,7 +381,7 @@ export default function SettingsScreen() {
           onPress={() => {
             Alert.alert(
               'Clear audio cache?',
-              'Spoken audio will be created again the next time you listen to a note. Your notes and your place in them are not affected.',
+              'Spoken audio will be created again the next time you listen to a note, and each note will start from the beginning. Your notes are not affected.',
               [
                 { text: 'Cancel', style: 'cancel' },
                 {
