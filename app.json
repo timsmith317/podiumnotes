@@ -75,6 +75,20 @@
       "expo-document-picker",
       "expo-sharing",
       [
+        "expo-build-properties",
+        {
+          "ios": {
+            "deploymentTarget": "16.4"
+          }
+        }
+      ],
+      [
+        "./plugins/withPodDeploymentTarget",
+        {
+          "target": "16.4"
+        }
+      ],
+      [
         "expo-splash-screen",
         {
           "backgroundColor": "#0f172a"

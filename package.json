@@ -5,6 +5,7 @@
   "dependencies": {
     "@react-native-async-storage/async-storage": "2.2.0",
     "expo": "~56.0.21",
+    "expo-build-properties": "~56.0.27",
     "expo-constants": "~56.0.18",
     "expo-document-picker": "^56.0.4",
     "expo-file-system": "^56.0.8",
