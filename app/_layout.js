@@ -11,6 +11,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import { useSettings, themeColors } from '../lib/useSettings';
 import { useNotes } from '../lib/useNotes';
 import { readDocumentAsText } from '../lib/importers';
+import { prepareHeadStart } from '../lib/listen';
 
 function RootNav() {
   const router = useRouter();
@@ -24,12 +25,21 @@ function RootNav() {
     resetOnBackground: true,
   });
 
+  // TEMPORARY diagnostics. console.warn, not __DEV__, because this only
+  // reproduces in a Release build where __DEV__ logging is stripped.
+  useEffect(() => {
+    console.warn('[share] hasShareIntent =', hasShareIntent,
+      '| keys =', shareIntent ? Object.keys(shareIntent).join(',') : 'null');
+  }, [hasShareIntent, shareIntent]);
+
   useEffect(() => {
     if (!hasShareIntent) return;
     (async () => {
       try {
         const text = shareIntent?.text || shareIntent?.webUrl || '';
         const files = shareIntent?.files || [];
+        console.warn('[share] handling: textLen =', text.length,
+          '| files =', files.length);
 
         if (text) {
           // ── Shared text (Apple Notes, Simplenote, Keep, ...) ──
@@ -52,10 +62,17 @@ function RootNav() {
             bodyText = rest.join('\n');
           }
           const newId = createNote({ title, body: bodyText });
+          console.warn('[share] createNote returned', typeof newId, newId);
           // Open the new note. Delay lets any share-URL redirect settle first
           // so this push lands cleanly on top.
           if (typeof newId === 'string') {
             setTimeout(() => router.push(`/${newId}`), 350);
+            // Render the opening while the reader is still looking at the
+            // note for the first time. The share sheet is how most notes
+            // arrive, and they land straight in the presenter without
+            // passing through edit mode — so without this they would always
+            // pay the full cold-start wait on first listen.
+            prepareHeadStart({ id: newId, title, body: bodyText }).catch(() => {});
           }
         } else if (files.length) {
           // ── Shared file (Files app → Share → Podium Notes) ──
@@ -80,6 +97,7 @@ function RootNav() {
             const newId = createNote({ title, body: bodyText });
             if (typeof newId === 'string') {
               setTimeout(() => router.push(`/${newId}`), 350);
+              prepareHeadStart({ id: newId, title, body: bodyText }).catch(() => {});
             }
           }
         }
