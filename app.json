@@ -74,6 +74,8 @@
       "expo-router",
       "expo-document-picker",
       "expo-sharing",
+      "expo-font",
+      "expo-status-bar",
       [
         "expo-build-properties",
         {
@@ -88,6 +90,7 @@
           "target": "16.4"
         }
       ],
+      "./plugins/withUISceneLifecycle",
       [
         "expo-splash-screen",
         {

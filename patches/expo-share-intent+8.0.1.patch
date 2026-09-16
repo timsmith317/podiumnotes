@@ -1,14 +1,14 @@
 diff --git a/node_modules/expo-share-intent/plugin/build/ios/ShareExtensionViewController.swift b/node_modules/expo-share-intent/plugin/build/ios/ShareExtensionViewController.swift
-index f1f4b72..1e988be 100644
+index f1f4b72..b4f1e13 100644
 --- a/node_modules/expo-share-intent/plugin/build/ios/ShareExtensionViewController.swift
 +++ b/node_modules/expo-share-intent/plugin/build/ios/ShareExtensionViewController.swift
 @@ -38,6 +38,17 @@ class ShareViewController: UIViewController {
  
    override func viewDidAppear(_ animated: Bool) {
      super.viewDidAppear(animated)
-+    // PATCHED v3: viewDidAppear fires when the share sheet's presentation
++    // PATCHED: viewDidAppear fires when the share sheet's presentation
 +    // transition completes. A small cushion covers any residual host-side
-+    // sheet animation, then any redirect that was requested early is released.
++    // sheet animation, then any redirect requested early is released.
 +    DispatchQueue.main.asyncAfter(deadline: .now() + presentationSettleSeconds) { [weak self] in
 +      guard let self = self else { return }
 +      self.presentationSettled = true
@@ -20,34 +20,21 @@ index f1f4b72..1e988be 100644
      if !hideView {
        handleViewLoad()
      }
-@@ -489,25 +500,97 @@ class ShareViewController: UIViewController {
+@@ -489,25 +500,81 @@ class ShareViewController: UIViewController {
      }
    }
  
-+  // PATCHED v3 (Podium Notes): device logs across builds 6 and 7 showed the
-+  // real root cause of source-app freezes (Simplenote, Google Keep): this
-+  // extension is invisible (hideView) and completes ~140ms after launch —
-+  // while the host's share-sheet PRESENTATION animation (~400-500ms) is still
-+  // running. The host then dismisses a sheet that is still presenting
-+  // ("Trying to dismiss the presentation controller while transitioning
-+  // already"), corrupting its transition state and leaving it deaf to touch.
-+  // Apple's apps tolerate the overlap; many third-party hosts do not.
-+  //
-+  // v3 therefore gates the redirect on the presentation settling: payload
-+  // processing still starts immediately in viewDidLoad, but completeRequest
-+  // is deferred until viewDidAppear (+ cushion) so the host's dismissal never
-+  // overlaps its presentation. v2's sequencing is kept downstream: complete
-+  // first so the host tears the sheet down while frontmost, then switch apps
-+  // after redirectDelaySeconds, held alive by performExpiringActivity.
++  // PATCHED (Podium Notes): see tools/apply_share_patch.py for the full
++  // reasoning. Completion is gated on the host's share sheet finishing its
++  // presentation, then sequenced completion-first so the host tears the sheet
++  // down while frontmost.
 +  private var didCompleteExtension = false
 +  private var presentationSettled = false
 +  private var pendingRedirectType: RedirectType? = nil
 +
 +  // Cushion after viewDidAppear before completion may fire.
 +  private let presentationSettleSeconds: TimeInterval = 0.3
-+  // How long the source app gets to finish share-sheet teardown before the
-+  // app switch. Device logs showed Simplenote still reporting ~950ms after
-+  // completion; tune here if needed.
++  // How long the source app gets to finish teardown before the app switch.
 +  private let redirectDelaySeconds: TimeInterval = 1.2
 +
 +  private func completeExtensionRequest() {
@@ -66,8 +53,6 @@ index f1f4b72..1e988be 100644
 +  }
 +
 +  private func performRedirect(type: RedirectType) {
-+    NSLog("[PodiumNotes ShareExt] patch v3 active (gate=viewDidAppear+%.1fs, redirectDelay=%.1fs)",
-+          presentationSettleSeconds, redirectDelaySeconds)
      let nonce = UUID().uuidString
      let url = URL(string: "\(shareProtocol)://dataUrl=\(sharedKey)?nonce=\(nonce)#\(type)")!
      var responder = self as UIResponder?
@@ -100,11 +85,11 @@ index f1f4b72..1e988be 100644
 +      return
 +    }
 +
-+    // 1. Complete first: source app dismisses its sheet while frontmost,
-+    //    from a fully-presented (settled) state.
++    // 1. Complete first: the source app dismisses its sheet while frontmost,
++    //    from a fully-presented state.
 +    completeExtensionRequest()
 +
-+    // 2. Deferred app switch, with the process held alive across the delay.
++    // 2. Deferred app switch, process held alive across the delay.
 +    let delay = redirectDelaySeconds
 +    DispatchQueue.global(qos: .userInitiated).async {
 +      ProcessInfo.processInfo.performExpiringActivity(withReason: "redirectToHostApp") { expired in
@@ -116,8 +101,7 @@ index f1f4b72..1e988be 100644
 +        DispatchQueue.main.sync {
 +          application.open(url, options: [:], completionHandler: nil)
 +        }
-+        // Hold the activity briefly so the open is fully dispatched before
-+        // the system suspends the extension.
++        // Hold briefly so the open is fully dispatched before suspension.
 +        Thread.sleep(forTimeInterval: 0.5)
        }
 -      responder = responder!.next
