@@ -27,6 +27,15 @@ import UIKit
 public class SpeechPlayerModule: Module {
   // Playback
   private var player: AVPlayer?
+  // Where playback actually is, independent of the CURRENT player object.
+  //
+  // Progressive rendering rebuilds the player as audio is appended, and a
+  // freshly built player reads currentTime 0 until the position is restored.
+  // pushNowPlaying used to read straight from the player, so a swap while
+  // paused published 0 to CarPlay and the lock screen — the position itself
+  // was fine, which is why play resumed correctly, but the car showed 0:00
+  // about ten seconds after every pause.
+  private var lastElapsed: Double = 0
   private var timeObserver: Any?
   private var endObserver: NSObjectProtocol?
   private var interruptionObserver: NSObjectProtocol?
@@ -457,6 +466,7 @@ public class SpeechPlayerModule: Module {
       DispatchQueue.main.async {
         do {
           try self.teardownPlayer(deactivateSession: false)
+          self.lastElapsed = 0        // a new note starts at the beginning
           self.configureAudioSession()
 
           let url = URL(fileURLWithPath: uri.replacingOccurrences(of: "file://", with: ""))
@@ -500,7 +510,15 @@ public class SpeechPlayerModule: Module {
       DispatchQueue.main.async {
         guard let p = self.player else { return }
         let wasPlaying = p.rate > 0
-        p.seek(to: CMTime(seconds: max(0, seconds), preferredTimescale: 600)) { _ in
+        let target = max(0, seconds)
+        self.lastElapsed = target
+        // ZERO TOLERANCE. Without it AVFoundation is free to land on a
+        // convenient boundary, and in a composition of concatenated AAC
+        // segments that can be seconds away — dragging to 10:00 landed at
+        // 13:00, then 1:38, depending on where the segment joins fell.
+        // Exact seeking costs a little decode work and is imperceptible here.
+        p.seek(to: CMTime(seconds: target, preferredTimescale: 600),
+               toleranceBefore: .zero, toleranceAfter: .zero) { _ in
           if wasPlaying { p.rate = self.playbackRate }
           self.pushNowPlaying(playing: wasPlaying)
         }
@@ -524,6 +542,7 @@ public class SpeechPlayerModule: Module {
     Function("stop") {
       DispatchQueue.main.async {
         try? self.teardownPlayer(deactivateSession: true)
+        self.lastElapsed = 0
         self.sendEvent("onState", ["state": "stopped"])
       }
     }
@@ -1066,6 +1085,10 @@ public class SpeechPlayerModule: Module {
       // Drop ticks while a swap settles, or the scrubber jumps to zero and
       // back. Playback itself is unaffected.
       if CFAbsoluteTimeGetCurrent() < self.suppressProgressUntil { return }
+      // Ticks during a swap are suppressed above, so this only ever records
+      // a real position — which is what makes it safe to trust when the
+      // player is mid-rebuild.
+      self.lastElapsed = elapsed
       // Audio is moving, so any underrun is over — this also catches the
       // race where the end-of-item notice lands just after a swap.
       if self.underrun, (self.player?.rate ?? 0) > 0 {
@@ -1199,7 +1222,10 @@ public class SpeechPlayerModule: Module {
   }()
 
   private func pushNowPlaying(playing: Bool) {
-    let elapsed = player.map { CMTimeGetSeconds($0.currentTime()) } ?? 0
+    // lastElapsed, not the player's clock: during a rebuild the new player
+    // reads 0 until the position is restored, and publishing that resets the
+    // car's display.
+    let elapsed = lastElapsed
     var info: [String: Any] = [
       MPMediaItemPropertyTitle: currentTitle.isEmpty ? "Podium Notes" : currentTitle,
       MPMediaItemPropertyArtist: "Podium Notes",
