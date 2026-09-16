@@ -52,7 +52,7 @@ import { prepareHeadStart } from '../../lib/listen';
 import { useListen, fmt } from '../../lib/useListen';
 import * as Print from 'expo-print';
 import { ui, IS_TABLET } from '../../lib/scale';
-import { bandAlphaColor, bandFillColor, bandBorderColor } from '../../lib/bandColor';
+import { bandAlphaColor, bandFillColor, bandBorderColor, lightenHex } from '../../lib/bandColor';
 
 // Font ladder — shared by present AND edit modes (one layout is the whole
 // point). iPad gets a taller ceiling for podium-distance reading.
@@ -240,6 +240,22 @@ export default function EditorScreen() {
   const hudBarRef = useRef({ x: 0, w: 0 });
   const listenRef = useRef(listen);
   const listeningRef = useRef(false);
+  // Set when the reader scrolls while not playing — the signal that the next
+  // play should start from the text rather than resume where audio stopped.
+  const scrolledSinceStopRef = useRef(false);
+
+  // Leaving the note ends a PAUSED session: the long-press exit is gone, so
+  // without this a paused render would keep going and the audio session stay
+  // active after the reader walked away. A PLAYING session is deliberately
+  // left alone — that is the drive-and-listen case, and stopping it because
+  // the screen unmounted is the opposite of what the reader wants.
+  useEffect(() => {
+    return () => {
+      if (!listenRef.current?.playing) {
+        try { listenRef.current?.stop(); } catch (e) {}
+      }
+    };
+  }, []);
   useEffect(() => { listenRef.current = listen; });
   useEffect(() => { listeningRef.current = listening; }, [listening]);
 
@@ -256,10 +272,12 @@ export default function EditorScreen() {
     };
     const finish = () => {
       if (!hudScrubbingRef.current) return;
-      const cap = listenRef.current.rendered > 0
-        ? listenRef.current.rendered - 0.5
-        : listenRef.current.duration;
-      const t = Math.min(hudScrubTRef.current, Math.max(0, cap));
+      // NO CLAMP. The drop is absolute: the text is the source, so audio for
+      // any point can be made on demand. This used to clamp to the rendered
+      // edge, which is why dropping at 10:04 with 1:38 rendered silently
+      // landed at 1:38 — the app substituting what it had for what was asked.
+      // seek() re-renders from the target when it falls outside the window.
+      const t = Math.max(0, hudScrubTRef.current);
       hudScrubbingRef.current = false;
       setHudScrubbing(false);
       listenRef.current.seek(t);
@@ -501,17 +519,41 @@ export default function EditorScreen() {
   // band is a large area WITH a border, behind dark text, while the bar is
   // 6pt of unoutlined colour on a grey track. Same value, very different
   // perceived weight. BAR_ALPHA is the dial.
+  // Band colours are chosen to sit BEHIND dark text on a light page, so most
+  // are dark — and a dark colour at 40% over a dark track is invisible. The
+  // measured contrast in dark mode was 1.49 against the track, below the 1.68
+  // that reads fine in light mode. Raising alpha alone tops out at 2.92, so
+  // the colour is lightened toward white first, then drawn more solidly.
+  const isDarkTheme = settings.themeMode === 'dark'
+    || (settings.themeMode === 'system' && colorScheme === 'dark');
   const progressColor = (settings.bandColor && settings.bandColor !== 'clear')
-    ? bandAlphaColor(settings.bandColor, BAR_ALPHA) : colors.accent;
+    ? (isDarkTheme
+        ? bandAlphaColor(lightenHex(settings.bandColor, 0.4), 0.7)
+        : bandAlphaColor(settings.bandColor, BAR_ALPHA))
+    : colors.accent;
+  // The buffered region carries its own opacity: 0.3 in the style. Feeding it
+  // themeColor (already 75%) landed near 22% — FAINTER than the 40% played
+  // fill and close enough to the track's grey to vanish entirely. The raw
+  // colour keeps it at 30%: visibly behind the fill, which is the convention,
+  // but still visible.
+  const bufferedColor = (settings.bandColor && settings.bandColor !== 'clear')
+    ? (isDarkTheme ? lightenHex(settings.bandColor, 0.4) : settings.bandColor)
+    : colors.accent;
   // The transport and mic deliberately keep the APP accent rather than the
   // band colour. Tinting them tracked the band well enough at rest but the
   // filled/active state needed per-colour contrast tuning to stay legible,
   // and the progress bar already carries the band colour through the HUD.
 
   const lineHeight = FONT_SIZES[fontIndex] * 1.55;
-  // Hidden while listening: the band means "the line I'm about to speak",
-  // which is false when the app is the one speaking. It doubles as the mode
-  // cue — band on, you're presenting; band off, you're listening.
+  // Hidden while PLAYING, not for the whole listening session. The band means
+  // "the line I'm about to speak", which is false only while the app is
+  // actually speaking — paused, the reader is back in charge of the text.
+  //
+  // This collapses what used to be two modes into one screen. Press play and
+  // the band goes; press pause and it returns, over whatever line the audio
+  // reached. Scrolling then works as it always has, and pressing play again
+  // starts from where you scrolled to. There is no "exit listening" step
+  // because there is nothing to exit.
   const bandHeight = settings.bandLines * lineHeight;
   const contentTop = insets.top + TOP_BAR_H + TITLE_BAR_H;
   const bandTop = height * (settings.bandPositionPct / 100) - bandHeight / 2;
@@ -708,6 +750,19 @@ export default function EditorScreen() {
     if (Math.abs(target - scrollYRef.current) < lineHeight * 0.6) return;
     scrollFollow(target);
   }, [listen.elapsed, listen.playing, listen.cueCount]);
+
+  // Dots, not words. A percentage answered a question nobody asked, and the
+  // words that replaced it wrapped over the progress bar and flashed past too
+  // fast to read — which reads as an error rather than as work. Three dots
+  // cycling say "working", which is all there is to say.
+  const [prepDots, setPrepDots] = useState(0);
+  useEffect(() => {
+    if (!listen.busy) { setPrepDots(0); return; }
+    const t = setInterval(() => setPrepDots(d => (d + 1) % 4), 400);
+    return () => clearInterval(t);
+  }, [listen.busy]);
+  // Figure-space padding keeps the width fixed so nothing jitters or wraps.
+  const prepLabel = '•••'.slice(0, prepDots) + '\u2007'.repeat(3 - prepDots);
 
   // Reaching the end returns the note to the top. Wherever the last cue
   // anchored is an arbitrary-looking spot, and what follows finishing a note
@@ -1390,7 +1445,7 @@ export default function EditorScreen() {
           false whenever the app owns the reading — and flickering it back on
           every pause made it unclear which mode you were in. It returns on
           long-press, which is the deliberate exit back to presenting. */}
-      {!editing && !listening && (
+      {!editing && !listen.playing && (
         <>
           <View pointerEvents="none" style={[styles.band, {
             top: clampedBandTop, height: bandHeight,
@@ -1435,6 +1490,13 @@ export default function EditorScreen() {
           if (!autoScrollingRef.current && followRef.current) {
             followRef.current = false;
             setFollowing(false);
+          }
+          // A finger on the text while the app is not speaking says "start
+          // from here next". onScroll was the wrong signal for this: it also
+          // fires for auto-follow's own scrolling, so the flag could be set
+          // or cleared without the reader touching anything.
+          if (!autoScrollingRef.current && !listenRef.current.playing) {
+            scrolledSinceStopRef.current = true;
           }
         }}
         onScroll={e => {
@@ -1489,9 +1551,27 @@ export default function EditorScreen() {
               onPress={() => {
                 if (listen.playing) { listen.pause(); return; }
                 if (voiceOn) stopVoice();     // mic and playback sessions conflict
-                listen.play();
+                // Start where the reader is LOOKING, not where audio last
+                // stopped. The presenter already shows this number while
+                // scrolling, so pressing play begins at the time on screen —
+                // the same instruction the scrubber gives, through the
+                // gesture the reader already trusts.
+                //
+                // Only on a fresh start: once listening, pause and resume
+                // keep their place, because that is what pause means.
+                // Estimate-derived, so only used when the reader has MOVED
+                // the text. Resuming an untouched pause resumes exactly —
+                // otherwise every pause would nudge the position by whatever
+                // the estimate is off by.
+                const fromScroll = (progressPctRef.current / 100) * speechSeconds;
+                const useScroll = !listening || scrolledSinceStopRef.current;
+                scrolledSinceStopRef.current = false;
+                listen.play(useScroll ? fromScroll : undefined);
               }}
-              onLongPress={() => { if (listening) listen.stop(); }}
+              // The long-press exit is gone. It existed because the band only
+              // returned when the whole session ended, so leaving listening
+              // needed its own gesture. Pause brings the band back now, so
+              // there is nothing left to exit from.
               delayLongPress={450}
               hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
             >
@@ -1531,7 +1611,7 @@ export default function EditorScreen() {
               >
                 {listening && listen.rendered > 0 && listen.duration > 0 && (
                   <View style={[styles.hudBuffered, {
-                    backgroundColor: themeColor,
+                    backgroundColor: bufferedColor,
                     width: `${Math.min(100, (listen.rendered / listen.duration) * 100)}%`,
                   }]} />
                 )}
@@ -1559,8 +1639,8 @@ export default function EditorScreen() {
                 color: hudScrubbing ? themeColor : colors.textMuted,
               }]}>
                 {listening
-                  ? (listen.busy && listen.synthPct > 0
-                      ? `${Math.round(listen.synthPct * 100)}%`
+                  ? (listen.busy
+                      ? prepLabel
                       : fmt(hudScrubbing ? hudScrubT : listen.elapsed))
                   : fmt((progress / 100) * speechSeconds)}
               </Text>
