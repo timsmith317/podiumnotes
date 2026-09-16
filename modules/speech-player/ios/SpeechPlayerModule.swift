@@ -36,6 +36,11 @@ public class SpeechPlayerModule: Module {
   // was fine, which is why play resumed correctly, but the car showed 0:00
   // about ten seconds after every pause.
   private var lastElapsed: Double = 0
+  // Bumped on every user seek. A swap seeks its new item asynchronously
+  // before installing it; if a seek lands in that window, the swap would
+  // otherwise install an item positioned at the PRE-seek time and silently
+  // undo it — the scrubber appearing to jump to a random spot.
+  private var seekGeneration = 0
   private var timeObserver: Any?
   private var endObserver: NSObjectProtocol?
   private var interruptionObserver: NSObjectProtocol?
@@ -198,8 +203,12 @@ public class SpeechPlayerModule: Module {
     // costs about half a second, which is dead time the user would otherwise
     // wait through before the first audio.
     AsyncFunction("prepareSynthEngine") { (modelDir: String, promise: Promise) in
+      NSLog("[timing] prepareSynthEngine called")
+      let t0 = CFAbsoluteTimeGetCurrent()
       do {
         try self.supertonicEngine().prepare(modelDir: modelDir) { error in
+          NSLog("[timing] model load finished in %.2fs (error=%@)",
+                CFAbsoluteTimeGetCurrent() - t0, error == nil ? "none" : "yes")
           if let error = error {
             promise.reject("E_MODEL", "Could not load the speech model: \(error.localizedDescription)")
           } else {
@@ -223,6 +232,8 @@ public class SpeechPlayerModule: Module {
     AsyncFunction("beginProgressive") {
       (text: String, dir: String, base: String, title: String,
        options: [String: Any], promise: Promise) in
+
+      NSLog("[timing] beginProgressive called (%d chars)", text.count)
 
       guard let modelDir = options["modelDir"] as? String, !modelDir.isEmpty,
             let stylePath = options["stylePath"] as? String, !stylePath.isEmpty else {
@@ -512,6 +523,7 @@ public class SpeechPlayerModule: Module {
         let wasPlaying = p.rate > 0
         let target = max(0, seconds)
         self.lastElapsed = target
+        self.seekGeneration += 1
         // ZERO TOLERANCE. Without it AVFoundation is free to land on a
         // convenient boundary, and in a composition of concatenated AAC
         // segments that can be seconds away — dragging to 10:00 landed at
@@ -871,7 +883,17 @@ public class SpeechPlayerModule: Module {
     // After an underrun the rate is 0 but the user never paused — resuming
     // is exactly what they're waiting for.
     let resume = p.rate > 0 || underrun
-    let at = p.currentTime()
+    let gen = seekGeneration
+
+    // currentTime() reads 0 on an item that isn't readyToPlay — which is
+    // exactly the state right after a previous swap. Capturing that zero
+    // made the swap restore the start of the note, so a pause during the
+    // first render could resume from 0:00. lastElapsed only ever records a
+    // settled position, so it's the safer source when the item isn't ready.
+    let itemReady = p.currentItem?.status == .readyToPlay
+    let atSeconds = itemReady ? CMTimeGetSeconds(p.currentTime()) : lastElapsed
+    let at = CMTime(seconds: max(0, atSeconds.isFinite ? atSeconds : lastElapsed),
+                    preferredTimescale: 600)
 
     // Prefer to swap inside a paragraph gap, where the seam is inaudible —
     // but only while there's time to wait for one.
@@ -899,6 +921,13 @@ public class SpeechPlayerModule: Module {
         self.duration = self.renderComplete ? self.renderedDuration
                                             : max(self.renderedDuration, self.estimatedDuration)
         self.reinstallItemObservers()
+
+        // A seek landed while this item was being prepared, so the position
+        // baked into it is stale. Honour the seek instead of overwriting it.
+        if gen != self.seekGeneration {
+          p.seek(to: CMTime(seconds: max(0, self.lastElapsed), preferredTimescale: 600),
+                 toleranceBefore: .zero, toleranceAfter: .zero)
+        }
         let wasUnderrun = self.underrun
         self.swapInFlight = false
         // Hold progress reporting briefly: currentTime is unreliable while

@@ -897,6 +897,18 @@ export default function EditorScreen() {
     collapseKeyboard();
     editPinYRef.current = scrollYRef.current;
     setEditing(false);
+
+    // Render the opening of the note NOW, while the reader is settling back
+    // into the text, so Listen starts in a couple of seconds instead of
+    // eight or nine. Leaving edit mode is the right moment: the text is
+    // final, and the cache key is the text hash — so an unchanged note is a
+    // no-op and an edited one renders its new opening.
+    //
+    // Not awaited and errors swallowed: a missing head start costs a slower
+    // start, never a broken one.
+    if (!listeningRef.current) {
+      prepareHeadStart({ id, title, body }).catch(() => {});
+    }
   }
 
   // Top / bottom jumps used by the menu arrows. animated:false — an animated
