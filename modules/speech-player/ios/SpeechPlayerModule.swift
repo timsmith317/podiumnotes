@@ -79,6 +79,21 @@ public class SpeechPlayerModule: Module {
   private var segmentBounds: [Double] = []   // cumulative end time of each appended segment
   private var gapBounds: [Double] = []       // …of only those that end with silence
   private var pendingSegments: [(url: URL, duration: Double, endsParagraph: Bool)] = []
+  // NOTE TIME vs PLAYER TIME.
+  //
+  // The composition has always begun at the start of the note, so the two
+  // were the same thing. To let a scrub jump ahead of the render, the
+  // composition can now begin partway in — and then player time (what
+  // AVPlayer reports) is offset from note time (what the reader means).
+  //
+  // Everything INTERNAL stays in player time: currentTime, lastElapsed,
+  // renderedDuration, segmentBounds, gapBounds. Only four boundaries convert
+  // — progress events, Now Playing, seekTo, and the composition setup — so
+  // the swap and gap logic keep working unchanged.
+  //
+  // Zero means "starts at the beginning", which is every existing path.
+  private var compositionStart: Double = 0
+
   private var renderedDuration: Double = 0   // audio appended AND composed so far
   private var estimatedDuration: Double = 0  // word-count guess, until the render finishes
   private var renderComplete = false
@@ -244,13 +259,27 @@ public class SpeechPlayerModule: Module {
       let speed = Float((options["speed"] as? Double) ?? 1.0)
       let language = (options["language"] as? String) ?? "en"
       let startAfter = (options["startAfterSeconds"] as? Double) ?? 20.0
+      // Note-time position the composition begins at. Stage two passes a real
+      // value when a scrub lands outside the rendered audio; every existing
+      // caller omits it and gets the previous behaviour exactly.
+      let startSeconds = (options["startSeconds"] as? Double) ?? 0
+      // The reader's Speaking Pace, so this timeline matches the one the
+      // presenter shows while scrolling. Falls back to the model's own rate.
+      let wpm = (options["estimateWPM"] as? Double) ?? 153.0
 
       let (paras, paraOffsets) = Self.paragraphChunks(text)
-      let (chunks, offsets, gaps) = Self.splitLeadParagraphs(paras, paraOffsets)
+      // Resolve the drop against PARAGRAPHS, before splitting — the split
+      // depends on where we're starting. At 0 this is paragraph 0 at time 0,
+      // so every existing caller behaves exactly as before.
+      let (startPara, startAt) = Self.chunkAt(seconds: startSeconds, chunks: paras, wpm: wpm)
+
+      let (chunks, offsets, gaps, paraToChunk) =
+        Self.splitLeadParagraphs(paras, paraOffsets)
       guard !chunks.isEmpty else {
         promise.reject("E_SYNTH", "Nothing to speak")
         return
       }
+      let startChunk = startPara < paraToChunk.count ? paraToChunk[startPara] : 0
 
       let dirURL = URL(fileURLWithPath: dir.replacingOccurrences(of: "file://", with: ""))
 
@@ -258,7 +287,10 @@ public class SpeechPlayerModule: Module {
         self.supertonic?.cancel()          // stop whatever was running
 
         do {
-          try self.beginComposition(title: title, estimated: Self.estimateSeconds(text))
+          self.estimateWPM = wpm
+          try self.beginComposition(title: title,
+                                    estimated: Self.estimateSeconds(text, wpm: wpm),
+                                    startSeconds: startAt)
         } catch {
           promise.reject("E_LOAD", error.localizedDescription)
           return
@@ -279,6 +311,7 @@ public class SpeechPlayerModule: Module {
             modelDir: modelDir, stylePath: stylePath,
             steps: steps, speed: speed, language: language,
             gapSeconds: self.segmentGap, gapFlags: gaps,
+            startIndex: startChunk,
             onSegment: { [weak self] index, url, duration, total in
               guard let self = self else { return }
               DispatchQueue.main.async {
@@ -300,7 +333,13 @@ public class SpeechPlayerModule: Module {
                 // character offset: offsets index the SANITIZED text, while
                 // the on-screen line map indexes the raw body, and
                 // normalisation shifts them apart. Words survive that.
-                let markTime = self.renderedDuration + self.pendingSeconds()
+                // NOTE time, to match `elapsed` in onProgress. The engine
+                // reports composition-relative times, which are the same
+                // thing only when the render began at the start of the note.
+                // After a scrub they differ by the offset — which is why the
+                // text followed the right words at the wrong moments.
+                let markTime = self.compositionStart
+                  + self.renderedDuration + self.pendingSeconds()
                 let chunkText = index < chunks.count ? chunks[index] : ""
                 let lead = String(chunkText.prefix(80))
 
@@ -343,7 +382,7 @@ public class SpeechPlayerModule: Module {
                   self.renderComplete = true
                   self.sendEvent("onSynthProgress", [
                     "progress": 1.0, "chunk": chunks.count, "total": chunks.count,
-                    "rendered": self.renderedDuration, "complete": true,
+                    "rendered": self.compositionStart + self.renderedDuration, "complete": true,
                     "marks": marks, "rtf": 0.0,
                     "markTime": -1.0, "markText": "", "endsParagraph": true,
                   ])
@@ -427,7 +466,7 @@ public class SpeechPlayerModule: Module {
       // Same split as beginProgressive — the head start must produce the
       // SAME segment files, or they'd be re-rendered instead of reused.
       let (paras, paraOffsets) = Self.paragraphChunks(text)
-      let (chunks, offsets, gaps) = Self.splitLeadParagraphs(paras, paraOffsets)
+      let (chunks, offsets, gaps, _) = Self.splitLeadParagraphs(paras, paraOffsets)
       guard !chunks.isEmpty else {
         promise.resolve(["rendered": 0.0, "complete": true, "segments": 0])
         return
@@ -478,6 +517,7 @@ public class SpeechPlayerModule: Module {
         do {
           try self.teardownPlayer(deactivateSession: false)
           self.lastElapsed = 0        // a new note starts at the beginning
+          self.compositionStart = 0   // the single-file path is never offset
           self.configureAudioSession()
 
           let url = URL(fileURLWithPath: uri.replacingOccurrences(of: "file://", with: ""))
@@ -521,7 +561,11 @@ public class SpeechPlayerModule: Module {
       DispatchQueue.main.async {
         guard let p = self.player else { return }
         let wasPlaying = p.rate > 0
-        let target = max(0, seconds)
+        // Inbound: the caller means note time. Everything below is player
+        // time, so shift it. A target before the composition's start clamps
+        // to its beginning — stage two is what makes that case impossible by
+        // re-rendering from the target instead.
+        let target = max(0, seconds - self.compositionStart)
         self.lastElapsed = target
         self.seekGeneration += 1
         // ZERO TOLERANCE. Without it AVFoundation is free to land on a
@@ -654,19 +698,35 @@ public class SpeechPlayerModule: Module {
   ///
   /// Returns a gap flag per chunk — only chunks that genuinely END a
   /// paragraph get trailing silence, so split sentences read continuously.
+  /// Split EVERY paragraph into sentence-sized pieces.
+  ///
+  /// This used to split only the opening few, so the first audio arrived
+  /// quickly and the rest rendered a paragraph at a time. Two things make
+  /// whole-note splitting the better shape:
+  ///
+  /// CANCELLATION. cancel() is checked between chunks, and an in-flight
+  /// tts.call runs to completion. With paragraph chunks a scrub waited for
+  /// whatever paragraph was rendering — measured at about eight seconds.
+  /// Sentence chunks bring that to a second or two.
+  ///
+  /// CORRECTNESS. Segment files are named by chunk index and reused when
+  /// found on disk. If the chunk list depended on where playback started,
+  /// index 40 would mean different text on different runs, and a scrub could
+  /// replay a segment rendered for an entirely different sentence. A
+  /// deterministic chunk list removes that whole class of error.
+  ///
+  /// Also returns, for each paragraph, the index of its first chunk — the
+  /// caller needs it to tell the engine where to begin.
   static func splitLeadParagraphs(_ chunks: [String], _ offsets: [Int],
-                                  paragraphsToSplit: Int = 4,
-                                  minSentenceChars: Int = 40)
-    -> ([String], [Int], [Bool]) {
+                                  minSentenceChars: Int = 25)
+    -> ([String], [Int], [Bool], [Int]) {
     var outChunks: [String] = []
     var outOffsets: [Int] = []
     var outGaps: [Bool] = []
+    var paraToChunk: [Int] = []
 
     for (i, para) in chunks.enumerated() {
-      guard i < paragraphsToSplit else {
-        outChunks.append(para); outOffsets.append(offsets[i]); outGaps.append(true)
-        continue
-      }
+      paraToChunk.append(outChunks.count)
       let pieces = sentencePieces(para, minChars: minSentenceChars)
       if pieces.count <= 1 {
         outChunks.append(para); outOffsets.append(offsets[i]); outGaps.append(true)
@@ -678,11 +738,23 @@ public class SpeechPlayerModule: Module {
         outGaps.append(j == pieces.count - 1)   // silence only at the real end
       }
     }
-    return (outChunks, outOffsets, outGaps)
+    return (outChunks, outOffsets, outGaps, paraToChunk)
   }
 
   /// Sentence boundaries at least `minChars` apart, so "Dr." and "3:16"
   /// don't each become their own chunk.
+  /// Break `text` at SENTENCE ENDS only.
+  ///
+  /// A word-boundary cap was tried here to shorten the worst-case chunk and
+  /// make scrubbing quicker. It worked — and the audio was unusable. The
+  /// synthesiser shapes intonation across a whole sentence, so feeding it
+  /// half a sentence produces flat, stuttered delivery with no natural
+  /// cadence. The gain was about two seconds on a scrub; the cost was the
+  /// reason for having a neural voice at all.
+  ///
+  /// So the chunk is a sentence, and the scrub wait is bounded by how long
+  /// the longest sentence takes to render. That is the trade, and it is the
+  /// right way round.
   private static func sentencePieces(_ text: String, minChars: Int)
     -> [(text: String, offset: Int)] {
     var pieces: [(String, Int)] = []
@@ -779,7 +851,8 @@ public class SpeechPlayerModule: Module {
   //      carries 0.35s of trailing silence and we know every boundary, so a
   //      sub-100ms swap inside that window is inaudible.
 
-  private func beginComposition(title: String, estimated: Double) throws {
+  private func beginComposition(title: String, estimated: Double,
+                                startSeconds: Double = 0) throws {
     try teardownPlayer(deactivateSession: false)
     // Session setup is BEST EFFORT, not a precondition. On iOS it always
     // succeeds; for an iOS app running on Apple Silicon macOS, AVAudioSession
@@ -805,6 +878,8 @@ public class SpeechPlayerModule: Module {
     underrun = false
     suppressProgressUntil = 0
     lastSegmentAt = CFAbsoluteTimeGetCurrent()
+    compositionStart = max(0, startSeconds)
+    lastElapsed = 0
     estimatedDuration = estimated
     currentTitle = title
     duration = estimated
@@ -1032,9 +1107,44 @@ public class SpeechPlayerModule: Module {
 
   /// Rough duration from word count, for the scrubber before the render ends.
   /// ~153 wpm is Supertonic's measured pace at speed 1.0.
-  private static func estimateSeconds(_ text: String) -> Double {
+  /// Which chunk contains note-time `seconds`, and where that chunk starts.
+  ///
+  /// Uses the SAME word-count estimate as the total on the scrubber, so the
+  /// two can't disagree: if the bar says 33 minutes and the reader drops at a
+  /// third of the way across, they land in the chunk the estimate puts a
+  /// third of the way through. The estimate drifts from real audio, but it
+  /// drifts identically at both ends.
+  ///
+  /// Returns the chunk's own estimated start, not the raw target — starting
+  /// mid-paragraph would clip the first words, and a paragraph boundary is
+  /// what the reader means anyway.
+  private static func chunkAt(seconds: Double, chunks: [String],
+                              wpm: Double) -> (index: Int, start: Double) {
+    guard seconds > 0, !chunks.isEmpty else { return (0, 0) }
+    var acc = 0.0
+    for (i, c) in chunks.enumerated() {
+      let d = estimateSeconds(c, wpm: wpm)
+      if seconds < acc + d { return (i, acc) }
+      acc += d
+    }
+    // Past the end: the last chunk, so a drop at the far right still plays
+    // something rather than silence.
+    let lastStart = acc - estimateSeconds(chunks[chunks.count - 1], wpm: wpm)
+    return (chunks.count - 1, max(0, lastStart))
+  }
+
+  /// Words per minute used for POSITION ESTIMATES — not for synthesis.
+  ///
+  /// These are different jobs and conflating them caused real confusion. The
+  /// narrator reads at the model's natural pace; this only decides where a
+  /// paragraph SITS on the timeline. The presenter's scroll timer uses the
+  /// reader's Speaking Pace, so this has to as well or the same paragraph
+  /// appears at two different times depending on which control you look at.
+  private var estimateWPM: Double = 153.0
+
+  private static func estimateSeconds(_ text: String, wpm: Double = 153.0) -> Double {
     let words = text.split{ $0 == " " || $0 == "\n" || $0 == "\t" }.count
-    return Double(words) / 153.0 * 60.0
+    return Double(words) / max(60.0, wpm) * 60.0
   }
 
   // Hand a prepared chunk list to the Supertonic backend and adapt its
@@ -1124,14 +1234,24 @@ public class SpeechPlayerModule: Module {
         self.underrun = false
         self.sendEvent("onState", ["state": "playing"])
       }
+      // Outbound: note time. maintainPlayback keeps player time, because
+      // gapBounds and segmentBounds are composition-relative.
+      let noteElapsed = self.compositionStart + elapsed
       self.sendEvent("onProgress", [
-        "elapsed": elapsed,
+        "elapsed": noteElapsed,
         "duration": self.duration,
-        "rendered": self.renderedDuration > 0 ? self.renderedDuration : self.duration,
+        "rendered": self.renderedDuration > 0
+          ? self.compositionStart + self.renderedDuration
+          : self.duration,
+        // Where the rendered window starts. Previously always 0, so JS could
+        // assume it; now a scrub can begin the composition partway in, and
+        // the scrub path needs both edges to know whether a target is
+        // reachable by seeking or needs a new render.
+        "renderedFrom": self.compositionStart,
       ])
       self.maintainPlayback(elapsed: elapsed)
       // Keep the lock screen / CarPlay scrubber honest without a full push.
-      MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPNowPlayingInfoPropertyElapsedPlaybackTime] = elapsed
+      MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPNowPlayingInfoPropertyElapsedPlaybackTime] = noteElapsed
     }
 
     installEndObserver()
@@ -1253,8 +1373,8 @@ public class SpeechPlayerModule: Module {
   private func pushNowPlaying(playing: Bool) {
     // lastElapsed, not the player's clock: during a rebuild the new player
     // reads 0 until the position is restored, and publishing that resets the
-    // car's display.
-    let elapsed = lastElapsed
+    // car's display. lastElapsed is player time, so offset it for display.
+    let elapsed = compositionStart + lastElapsed
     var info: [String: Any] = [
       MPMediaItemPropertyTitle: currentTitle.isEmpty ? "Podium Notes" : currentTitle,
       MPMediaItemPropertyArtist: "Podium Notes",

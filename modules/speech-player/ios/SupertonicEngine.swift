@@ -254,6 +254,14 @@ final class SupertonicEngine {
     /// silence. Sentence-sized chunks inside one paragraph must run together
     /// or the opening sounds stilted. Empty means "every chunk ends one".
     gapFlags: [Bool] = [],
+    /// First chunk to render. Everything before it is left alone — its
+    /// segments stay on disk and are reused if playback returns there.
+    ///
+    /// This is what lets a scrub land ahead of the render: the text is the
+    /// source, so audio for any paragraph can be made on demand. There is no
+    /// requirement that a render start at the beginning; it only ever did
+    /// because "press play and listen through" was the only entry point.
+    startIndex: Int = 0,
     onSegment: @escaping (Int, URL, Double, Int) -> Void,
     completion: @escaping (Result<[[String: Any]], Error>) -> Void
   ) {
@@ -274,9 +282,14 @@ final class SupertonicEngine {
 
         let sampleRate = Double(tts.sampleRate)
         var marks: [[String: Any]] = []
+        // Composition-relative: the first chunk rendered sits at 0 in the
+        // composition, whatever its position in the note. SpeechPlayerModule
+        // holds the note-time offset.
         var elapsed = 0.0
 
-        for (i, chunk) in chunks.enumerated() {
+        let first = max(0, min(startIndex, chunks.count))
+        for i in first..<chunks.count {
+          let chunk = chunks[i]
           if self.cancelled { break }
 
           marks.append(["offset": offsets[i], "time": elapsed])
