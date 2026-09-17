@@ -229,7 +229,13 @@ export default function EditorScreen() {
   // about to speak" is a claim the app can't make when it's the one
   // speaking.
   const listen = useListen({ id, title, body }, settings.wpm || 130, !!note);
-  const listening = listen.playing || listen.busy || listen.phase === 'paused';
+  // Two modes, not three. Pausing used to keep the HUD in its audio layout —
+  // band back, but no scroll timer and no text progress bar — which read as a
+  // hybrid state rather than as presenting. Pause now returns the screen to
+  // presenting completely: band, scroll progress, the time-into-the-talk
+  // readout, and the font controls. The audio position is still held, so play
+  // resumes exactly unless the reader has scrolled somewhere else.
+  const listening = listen.playing || listen.busy;
 
   // Scrubber drag on the HUD track. Same capture-phase approach as before:
   // a JS PanResponder must claim the touch before the ScrollView behind it.
@@ -545,15 +551,9 @@ export default function EditorScreen() {
   // and the progress bar already carries the band colour through the HUD.
 
   const lineHeight = FONT_SIZES[fontIndex] * 1.55;
-  // Hidden while PLAYING, not for the whole listening session. The band means
-  // "the line I'm about to speak", which is false only while the app is
-  // actually speaking — paused, the reader is back in charge of the text.
-  //
-  // This collapses what used to be two modes into one screen. Press play and
-  // the band goes; press pause and it returns, over whatever line the audio
-  // reached. Scrolling then works as it always has, and pressing play again
-  // starts from where you scrolled to. There is no "exit listening" step
-  // because there is nothing to exit.
+  // Hidden only while the app is speaking. The band means "the line I'm about
+  // to speak", which is false exactly then — paused, the reader is back in
+  // charge of the text and gets the whole presenting HUD with it.
   const bandHeight = settings.bandLines * lineHeight;
   const contentTop = insets.top + TOP_BAR_H + TITLE_BAR_H;
   const bandTop = height * (settings.bandPositionPct / 100) - bandHeight / 2;
@@ -1445,7 +1445,7 @@ export default function EditorScreen() {
           false whenever the app owns the reading — and flickering it back on
           every pause made it unclear which mode you were in. It returns on
           long-press, which is the deliberate exit back to presenting. */}
-      {!editing && !listen.playing && (
+      {!editing && !listening && (
         <>
           <View pointerEvents="none" style={[styles.band, {
             top: clampedBandTop, height: bandHeight,
@@ -1497,7 +1497,7 @@ export default function EditorScreen() {
           // or cleared without the reader touching anything.
           if (!autoScrollingRef.current && !listenRef.current.playing) {
             scrolledSinceStopRef.current = true;
-          }
+          }   // auto-follow's own scrolling must not count as an instruction
         }}
         onScroll={e => {
           const y = e.nativeEvent.contentOffset.y;
@@ -1564,9 +1564,14 @@ export default function EditorScreen() {
                 // otherwise every pause would nudge the position by whatever
                 // the estimate is off by.
                 const fromScroll = (progressPctRef.current / 100) * speechSeconds;
-                const useScroll = !listening || scrolledSinceStopRef.current;
+                // Resume exactly from a pause the reader did not scroll away
+                // from; otherwise start from the text. Keyed on the hook's
+                // phase rather than on `listening`, which no longer includes
+                // paused.
+                const resuming = listen.phase === 'paused'
+                  && !scrolledSinceStopRef.current;
                 scrolledSinceStopRef.current = false;
-                listen.play(useScroll ? fromScroll : undefined);
+                listen.play(resuming ? undefined : fromScroll);
               }}
               // The long-press exit is gone. It existed because the band only
               // returned when the whole session ended, so leaving listening
