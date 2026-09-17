@@ -111,6 +111,14 @@ public class SpeechPlayerModule: Module {
   // The play head is parked at the buffer edge waiting for more; the next
   // append resumes it.
   private var underrun = false
+  // When the in-flight swap began. A swap clears swapInFlight from inside
+  // item.seek's completion handler, and that handler is not guaranteed to
+  // run promptly — the CPU is saturated by ONNX inference while a render is
+  // in progress. If it never runs, swapInFlight stays true and EVERY later
+  // swap returns at the guard, so no new audio ever reaches the player and
+  // playback stops for good. This is the watchdog for that.
+  private var swapStartedAt: Double = 0
+  private let SWAP_STUCK_AFTER: Double = 4.0
   private var lastSegmentAt: CFAbsoluteTime = 0
 
   // Swapping the player item is never free: it costs a brief audio seam and
@@ -353,7 +361,13 @@ public class SpeechPlayerModule: Module {
                   "progress": Double(index + 1) / Double(total),
                   "chunk": index + 1,
                   "total": total,
-                  "rendered": self.renderedDuration + self.pendingSeconds(),
+                  // NOTE time, like every other `rendered` that crosses the
+                  // bridge. This one was left composition-relative when the
+                  // offset was introduced, so after a scrub the buffered bar
+                  // alternated between two values an offset apart — a visible
+                  // pulse, harmless to audio, and purely an accounting slip.
+                  "rendered": self.compositionStart + self.renderedDuration
+                    + self.pendingSeconds(),
                   "complete": false,
                   "marks": [[String: Any]](),
                   "rtf": rtf,
@@ -367,7 +381,8 @@ public class SpeechPlayerModule: Module {
                   resolved = true
                   promise.resolve([
                     "estimatedDuration": self.estimatedDuration,
-                    "rendered": self.renderedDuration,
+                    "rendered": self.compositionStart + self.renderedDuration,
+                    "renderedFrom": self.compositionStart,
                   ])
                 }
               }
@@ -390,7 +405,8 @@ public class SpeechPlayerModule: Module {
                     resolved = true
                     promise.resolve([
                       "estimatedDuration": self.estimatedDuration,
-                      "rendered": self.renderedDuration,
+                      "rendered": self.compositionStart + self.renderedDuration,
+                      "renderedFrom": self.compositionStart,
                     ])
                   }
                 case .failure(let e):
@@ -825,6 +841,7 @@ public class SpeechPlayerModule: Module {
         self.underrun = true
         self.pushNowPlaying(playing: false)
         self.sendEvent("onState", ["state": "buffering"])
+        self.scheduleUnderrunRecovery()
         return
       }
       if self.loop {
@@ -951,9 +968,18 @@ public class SpeechPlayerModule: Module {
   /// Swap in a player item that includes the newly appended audio, waiting
   /// for a paragraph gap so the transition falls in silence.
   private func scheduleSwap() {
+    // A swap that has been "in flight" for seconds is not in flight; its
+    // completion handler is never going to run. Taking it back is strictly
+    // better than leaving playback wedged.
+    if swapInFlight, CFAbsoluteTimeGetCurrent() - swapStartedAt > SWAP_STUCK_AFTER {
+      NSLog("[SpeechPlayer] swap appeared stuck after %.1fs — reclaiming",
+            CFAbsoluteTimeGetCurrent() - swapStartedAt)
+      swapInFlight = false
+    }
     guard !swapInFlight, let p = player, let comp = composition,
           let snapshot = comp.copy() as? AVComposition else { return }
     swapInFlight = true
+    swapStartedAt = CFAbsoluteTimeGetCurrent()
 
     // After an underrun the rate is 0 but the user never paused — resuming
     // is exactly what they're waiting for.
@@ -1005,6 +1031,7 @@ public class SpeechPlayerModule: Module {
         }
         let wasUnderrun = self.underrun
         self.swapInFlight = false
+        self.swapStartedAt = 0
         // Hold progress reporting briefly: currentTime is unreliable while
         // the new item settles, and a near-zero reading reaches the UI as a
         // scrubber flash.
@@ -1036,13 +1063,45 @@ public class SpeechPlayerModule: Module {
       pushNowPlaying(playing: true)
       return
     }
-    guard attempt < 12 else {          // ~2.4s; something else is wrong
+    // The old ceiling was 12 attempts — about 2.4 seconds — and it expired
+    // under render load, leaving the player paused with the right audio
+    // sitting behind it. Recovery then depended on the next segment happening
+    // to trigger another swap, which is why a scrub sometimes stopped and
+    // restarted by itself and sometimes just stopped.
+    //
+    // Waiting longer costs nothing: if the item does become ready, playback
+    // resumes; if it never does, the user is no worse off than before.
+    guard attempt < 60 else {          // ~15s
+      NSLog("[SpeechPlayer] item never became ready to play")
       pushNowPlaying(playing: false)
       return
     }
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
       guard let self = self, self.player === p else { return }
+      // Still wanted? A pause or a stop during the wait ends it.
+      guard self.underrun || announce || (self.player?.rate ?? 0) == 0 else { return }
       self.startPlayback(p, announce: announce, attempt: attempt + 1)
+    }
+  }
+
+  /// Keep trying to get out of an underrun.
+  ///
+  /// Recovery normally rides on the next segment arriving: it appends, swaps,
+  /// and playback resumes. But nothing guarantees a segment arrives soon —
+  /// the render may be between chunks, or a swap may have been reclaimed by
+  /// the watchdog — and the periodic time observer is silent while stopped,
+  /// because the clock is not advancing. Without this, an underrun that
+  /// missed its swap waits for a tap that the reader should never have to
+  /// give.
+  private func scheduleUnderrunRecovery(attempt: Int = 0) {
+    guard underrun, attempt < 40 else { return }      // ~60s
+    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+      guard let self = self, self.underrun else { return }
+      // Anything waiting to be appended, append it — a thin composition is
+      // the usual reason there is nothing to swap to.
+      self.flushPending(force: true)
+      self.scheduleSwap()
+      self.scheduleUnderrunRecovery(attempt: attempt + 1)
     }
   }
 
