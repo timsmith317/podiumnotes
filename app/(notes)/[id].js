@@ -288,6 +288,24 @@ export default function EditorScreen() {
       setHudScrubbing(false);
       listenRef.current.seek(t);
       listenRef.current.savePosition(t);
+
+      // Put the TEXT where the audio is going, at once.
+      //
+      // A scrub clears the cues and rebuilds them as segments render, so the
+      // follower has nothing to follow for a second or two — the text sat
+      // where it was and then crawled to catch up, which reads as being lost
+      // rather than as waiting. The scroll position for a given time is the
+      // same mapping the presenter's timer uses, run backwards, so the text
+      // can jump there immediately and let the cues take over when they
+      // arrive.
+      if (speechSeconds > 0) {
+        const denom = Math.max(1, contentHRef.current - viewportHRef.current);
+        const y = Math.max(0, Math.min(denom, (t / speechSeconds) * denom));
+        autoScrollingRef.current = true;
+        scrollRef.current?.scrollTo({ y, animated: false });
+        // Cleared on the next frame so the reader's own drags still register.
+        requestAnimationFrame(() => { autoScrollingRef.current = false; });
+      }
     };
     hudPan.current = PanResponder.create({
       onStartShouldSetPanResponder: canScrub,
@@ -549,6 +567,30 @@ export default function EditorScreen() {
   // band colour. Tinting them tracked the band well enough at rest but the
   // filled/active state needed per-colour contrast tuning to stay legible,
   // and the progress bar already carries the band colour through the HUD.
+
+  // Start rendering the whole note as soon as it is open.
+  //
+  // The renderer outruns playback about four to one, so a few minutes with
+  // the note on screen leaves the entire thing on disk — after which every
+  // scrub is instant and there are no unrendered gaps to fall into. Opening
+  // two notes and leaving each a few minutes prepares both.
+  //
+  // Debounced, so flicking through notes doesn't start a render for each.
+  // Skipped while editing, because the text is still changing and every
+  // keystroke invalidates the cache key. Not awaited, and errors swallowed:
+  // a render that doesn't happen costs a slower first listen, never an error.
+  useEffect(() => {
+    if (editing || listening || !body?.trim()) return;
+    const t = setTimeout(() => {
+      prepareHeadStart({ id, title, body }).catch(() => {});
+    }, 1500);
+    return () => clearTimeout(t);
+  }, [id, editing, listening, body]);
+
+  // Smallest width the buffered window is drawn at, so "the engine is
+  // working ahead of you" stays visible on a long note even when the buffer
+  // is a couple of percent of it.
+  const BUFFER_MIN_PCT = 4;
 
   const lineHeight = FONT_SIZES[fontIndex] * 1.55;
   // Hidden only while the app is speaking. The band means "the line I'm about
@@ -1564,14 +1606,20 @@ export default function EditorScreen() {
                 // otherwise every pause would nudge the position by whatever
                 // the estimate is off by.
                 const fromScroll = (progressPctRef.current / 100) * speechSeconds;
-                // Resume exactly from a pause the reader did not scroll away
-                // from; otherwise start from the text. Keyed on the hook's
-                // phase rather than on `listening`, which no longer includes
-                // paused.
-                const resuming = listen.phase === 'paused'
-                  && !scrolledSinceStopRef.current;
+                // Start from the text ONLY if the reader moved it.
+                //
+                // This used to also require the hook to be in its paused
+                // phase, which quietly broke resuming across app launches:
+                // after a force quit the phase is idle, so the saved audio
+                // position was discarded in favour of wherever the text
+                // happened to be — usually the top. Coming back to a talk on
+                // the next morning's drive and hearing it start over is the
+                // worst failure this feature has, so the rule is now simply:
+                // a finger on the text is an instruction, and everything
+                // else resumes.
+                const useScroll = scrolledSinceStopRef.current;
                 scrolledSinceStopRef.current = false;
-                listen.play(resuming ? undefined : fromScroll);
+                listen.play(useScroll ? fromScroll : undefined);
               }}
               // The long-press exit is gone. It existed because the band only
               // returned when the whole session ended, so leaving listening
@@ -1614,10 +1662,25 @@ export default function EditorScreen() {
                 style={[styles.hudTrack, { backgroundColor: colors.border }]}
                 onLayout={e => { hudBarRef.current.w = e.nativeEvent.layout.width; }}
               >
-                {listening && listen.rendered > 0 && listen.duration > 0 && (
+                {/* The buffered region is a WINDOW, not a span from the
+                    origin. A scrub can begin the composition partway into
+                    the note, and drawing from zero claimed audio existed
+                    before its start — which is why the shading looked wrong
+                    after a jump: too full, then apparently shrinking as a
+                    later composition started further along. */}
+                {listening && listen.rendered > listen.renderedFrom && listen.duration > 0 && (
                   <View style={[styles.hudBuffered, {
                     backgroundColor: bufferedColor,
-                    width: `${Math.min(100, (listen.rendered / listen.duration) * 100)}%`,
+                    left: `${Math.min(100, (listen.renderedFrom / listen.duration) * 100)}%`,
+                    // A real buffer is small against a long note: thirty
+                    // seconds of audio on a 33-minute talk is 1.6% of the
+                    // bar, about three pixels, most of it behind the thumb.
+                    // The old bar looked substantial only because it drew
+                    // from the origin, which claimed audio that did not
+                    // exist. A floor keeps the true window legible without
+                    // overstating it.
+                    width: `${Math.max(BUFFER_MIN_PCT, Math.min(100,
+                      ((listen.rendered - listen.renderedFrom) / listen.duration) * 100))}%`,
                   }]} />
                 )}
                 <View style={[styles.hudFill, {
@@ -1839,10 +1902,25 @@ const styles = StyleSheet.create({
     paddingTop: ui(4), paddingBottom: ui(22),
   },
   hudTrack: { height: ui(6), borderRadius: ui(3), overflow: 'hidden' },
-  hudFill:  { height: '100%', borderRadius: ui(3) },
+  hudFill: {
+    position: 'absolute', left: 0, top: 0, bottom: 0,
+    borderRadius: ui(3), zIndex: 2,
+  },
   // Rendered-but-unplayed, behind the played fill — the same convention
   // every video player uses, so it needs no explanation.
-  hudBuffered: { position: 'absolute', left: 0, top: 0, bottom: 0, borderRadius: ui(3), opacity: 0.3 },
+  // `left` is set inline: the rendered window can start partway along.
+  // 0.45, not 0.3: it sits UNDER the played fill and has to stay legible as
+  // a thin sliver, which 0.3 of an already-transparent colour did not.
+  // Both bands are absolutely positioned and explicitly stacked. hudFill
+  // used to be a normal flow child with height:'100%', so its layout box
+  // covered the whole track and painted over the buffered band underneath —
+  // which is why the buffered region was invisible no matter how wide or how
+  // opaque it was made. The data had been right for some time; the pixels
+  // were not.
+  hudBuffered: {
+    position: 'absolute', left: 0, top: 0, bottom: 0,
+    borderRadius: ui(3), opacity: 0.45, zIndex: 1,
+  },
   // top = track centre (paddingTop + half the 6pt track) minus half the
   // thumb, so it stays centred if the padding above ever changes again.
   hudThumb: {
