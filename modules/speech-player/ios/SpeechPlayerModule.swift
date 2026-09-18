@@ -226,12 +226,8 @@ public class SpeechPlayerModule: Module {
     // costs about half a second, which is dead time the user would otherwise
     // wait through before the first audio.
     AsyncFunction("prepareSynthEngine") { (modelDir: String, promise: Promise) in
-      NSLog("[timing] prepareSynthEngine called")
-      let t0 = CFAbsoluteTimeGetCurrent()
       do {
         try self.supertonicEngine().prepare(modelDir: modelDir) { error in
-          NSLog("[timing] model load finished in %.2fs (error=%@)",
-                CFAbsoluteTimeGetCurrent() - t0, error == nil ? "none" : "yes")
           if let error = error {
             promise.reject("E_MODEL", "Could not load the speech model: \(error.localizedDescription)")
           } else {
@@ -256,8 +252,6 @@ public class SpeechPlayerModule: Module {
       (text: String, dir: String, base: String, title: String,
        options: [String: Any], promise: Promise) in
 
-      NSLog("[timing] beginProgressive called (%d chars)", text.count)
-
       guard let modelDir = options["modelDir"] as? String, !modelDir.isEmpty,
             let stylePath = options["stylePath"] as? String, !stylePath.isEmpty else {
         promise.reject("E_MODEL", "beginProgressive requires modelDir and stylePath")
@@ -276,18 +270,22 @@ public class SpeechPlayerModule: Module {
       let wpm = (options["estimateWPM"] as? Double) ?? 153.0
 
       let (paras, paraOffsets) = Self.paragraphChunks(text)
-      // Resolve the drop against PARAGRAPHS, before splitting — the split
-      // depends on where we're starting. At 0 this is paragraph 0 at time 0,
-      // so every existing caller behaves exactly as before.
-      let (startPara, startAt) = Self.chunkAt(seconds: startSeconds, chunks: paras, wpm: wpm)
-
-      let (chunks, offsets, gaps, paraToChunk) =
+      let (chunks, offsets, gaps, _) =
         Self.splitLeadParagraphs(paras, paraOffsets)
       guard !chunks.isEmpty else {
         promise.reject("E_SYNTH", "Nothing to speak")
         return
       }
-      let startChunk = startPara < paraToChunk.count ? paraToChunk[startPara] : 0
+
+      // Resolve the drop against SENTENCES, not paragraphs.
+      //
+      // Paragraph granularity meant a drop at 7:00 inside a paragraph that
+      // began at 6:30 started thirty seconds earlier than asked — enough to
+      // feel lost rather than approximate. Chunks are whole sentences, so a
+      // sentence boundary is just as natural a place to begin and lands
+      // within a few seconds of the drop.
+      let (startChunk, startAt) = Self.chunkAt(seconds: startSeconds,
+                                               chunks: chunks, wpm: wpm)
 
       let dirURL = URL(fileURLWithPath: dir.replacingOccurrences(of: "file://", with: ""))
 
@@ -311,7 +309,24 @@ public class SpeechPlayerModule: Module {
         // discard itself as superseded and the promise would never settle.
         let myGen = self.progressiveGen
 
+        // Anything already on disk goes in first, with no engine involved —
+        // so a scrub into rendered audio starts playing while the engine is
+        // still finishing the chunk it was told to abandon.
+        let engineStart = self.preloadExistingSegments(
+          from: startChunk, chunks: chunks, offsets: offsets, gaps: gaps,
+          dir: dirURL, base: base)
+
         var resolved = false
+        // Already playable? Settle now; the renderer catches up underneath.
+        if self.renderedDuration >= startAfter || engineStart >= chunks.count {
+          resolved = true
+          promise.resolve([
+            "estimatedDuration": self.estimatedDuration,
+            "rendered": self.compositionStart + self.renderedDuration,
+            "renderedFrom": self.compositionStart,
+          ])
+        }
+
         do {
           let engine = try self.supertonicEngine()
           engine.synthesizeSegments(
@@ -319,7 +334,7 @@ public class SpeechPlayerModule: Module {
             modelDir: modelDir, stylePath: stylePath,
             steps: steps, speed: speed, language: language,
             gapSeconds: self.segmentGap, gapFlags: gaps,
-            startIndex: startChunk,
+            startIndex: engineStart,
             onSegment: { [weak self] index, url, duration, total in
               guard let self = self else { return }
               DispatchQueue.main.async {
@@ -477,7 +492,11 @@ public class SpeechPlayerModule: Module {
       let steps = (options["steps"] as? Int) ?? 8
       let speed = Float((options["speed"] as? Double) ?? 1.0)
       let language = (options["language"] as? String) ?? "en"
-      let budget = (options["maxSeconds"] as? Double) ?? 20.0
+      // <= 0 means no budget: render the whole note. Opening a note now
+      // starts a full background render, so that by the time the reader wants
+      // to listen the audio already exists and no scrub has to wait.
+      let rawBudget = (options["maxSeconds"] as? Double) ?? 20.0
+      let budget = rawBudget <= 0 ? Double.greatestFiniteMagnitude : rawBudget
 
       // Same split as beginProgressive — the head start must produce the
       // SAME segment files, or they'd be re-rendered instead of reused.
@@ -903,6 +922,70 @@ public class SpeechPlayerModule: Module {
     player = nil
   }
 
+  /// Duration of a segment already on disk, or nil if it isn't there.
+  private static func segmentDuration(_ url: URL) -> Double? {
+    guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+    guard let f = try? AVAudioFile(forReading: url) else { return nil }
+    let sr = f.fileFormat.sampleRate
+    return sr > 0 ? Double(f.length) / sr : nil
+  }
+
+  /// Load segments that ALREADY EXIST, starting at `from`, without involving
+  /// the synthesis engine at all. Returns the first index not loaded.
+  ///
+  /// A scrub backwards into audio that was rendered minutes ago still waited
+  /// on the engine: cancelling a render blocks until its in-flight chunk
+  /// finishes, and the new call queues behind it on the same serial queue. So
+  /// a jump to audio sitting complete on disk paid two seconds for inference
+  /// it did not need. Reading the files costs nothing by comparison, so the
+  /// composition can be built and playing before the engine is asked for
+  /// anything — which also covers replaying a note already rendered end to
+  /// end, the common case in the car.
+  ///
+  /// Stops at the first missing segment: the composition has to be
+  /// contiguous, and whatever follows the gap is the renderer's job.
+  ///
+  /// There is no length cap. There was one — two minutes — as insurance
+  /// against inserting hundreds of segments at once, and it was misplaced:
+  /// insertTimeRange is a metadata operation, not a decode. The cap meant
+  /// that opening a note, letting it render fully, and then pressing play
+  /// loaded only the first two minutes into the composition, so the buffered
+  /// bar showed a tenth of a note that was complete on disk.
+  private func preloadExistingSegments(from start: Int, chunks: [String],
+                                       offsets: [Int], gaps: [Bool],
+                                       dir: URL, base: String,
+                                       maxSeconds: Double = .greatestFiniteMagnitude) -> Int {
+    var i = start
+    var loaded = 0.0
+    while i < chunks.count, loaded < maxSeconds {
+      let url = dir.appendingPathComponent(SupertonicEngine.segmentName(base: base, index: i))
+      guard let d = Self.segmentDuration(url), d > 0 else { break }
+
+      let markTime = compositionStart + renderedDuration + pendingSeconds()
+      let endsPara = i < gaps.count ? gaps[i] : true
+      enqueueSegment(url: url, duration: d, endsParagraph: endsPara)
+
+      // Same payload shape as a rendered segment — Expo throws on a missing
+      // property, so an abbreviated event would break the listener.
+      sendEvent("onSynthProgress", [
+        "progress": Double(i + 1) / Double(chunks.count),
+        "chunk": i + 1,
+        "total": chunks.count,
+        "rendered": compositionStart + renderedDuration + pendingSeconds(),
+        "complete": false,
+        "marks": [[String: Any]](),
+        "rtf": 0.0,
+        "markTime": markTime,
+        "markText": String((i < chunks.count ? chunks[i] : "").prefix(80)),
+        "endsParagraph": endsPara,
+      ])
+
+      loaded += d
+      i += 1
+    }
+    return i
+  }
+
   private func pendingSeconds() -> Double {
     return pendingSegments.reduce(0) { $0 + $1.duration }
   }
@@ -959,7 +1042,9 @@ public class SpeechPlayerModule: Module {
     let p = AVPlayer(playerItem: item)
     p.actionAtItemEnd = .pause
     player = p
-    duration = max(renderedDuration, estimatedDuration)
+    // NOTE time: the composition may begin partway into the note, so its own
+    // length is not the note's length.
+    duration = max(compositionStart + renderedDuration, estimatedDuration)
     installObservers()
     registerRemoteCommands()
     pushNowPlaying(playing: false)
@@ -1019,8 +1104,14 @@ public class SpeechPlayerModule: Module {
       guard let self = self else { return }
       DispatchQueue.main.async {
         p.replaceCurrentItem(with: item)
-        self.duration = self.renderComplete ? self.renderedDuration
-                                            : max(self.renderedDuration, self.estimatedDuration)
+        // renderedDuration is composition-relative. Using it raw as the
+        // note's duration meant that after a scrub to minute ten, finishing
+        // the render reported a total of however long the composition was —
+        // the log showed the bar's total jumping between 1016, 648 and 700
+        // seconds for the same note, which moves every position on it.
+        self.duration = self.renderComplete
+          ? self.compositionStart + self.renderedDuration
+          : max(self.compositionStart + self.renderedDuration, self.estimatedDuration)
         self.reinstallItemObservers()
 
         // A seek landed while this item was being prepared, so the position
@@ -1299,8 +1390,18 @@ public class SpeechPlayerModule: Module {
       self.sendEvent("onProgress", [
         "elapsed": noteElapsed,
         "duration": self.duration,
+        // Audio that EXISTS, not audio that has been appended.
+        //
+        // flushPending deliberately holds segments back until the buffer
+        // ahead of the play head drops below 45s, so the composition trails
+        // the renderer by however much is pending — often minutes. Reporting
+        // only the composition made the buffered bar sit permanently ~45s
+        // ahead of the play head, while the synthesis event reported the
+        // pending pile too. The bar therefore alternated between the two a
+        // second apart, which is the flicker, and never showed the renderer
+        // running away with the note, which is the thing worth seeing.
         "rendered": self.renderedDuration > 0
-          ? self.compositionStart + self.renderedDuration
+          ? self.compositionStart + self.renderedDuration + self.pendingSeconds()
           : self.duration,
         // Where the rendered window starts. Previously always 0, so JS could
         // assume it; now a scrub can begin the composition partway in, and
