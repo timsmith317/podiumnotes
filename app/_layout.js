@@ -25,21 +25,12 @@ function RootNav() {
     resetOnBackground: true,
   });
 
-  // TEMPORARY diagnostics. console.warn, not __DEV__, because this only
-  // reproduces in a Release build where __DEV__ logging is stripped.
-  useEffect(() => {
-    console.warn('[share] hasShareIntent =', hasShareIntent,
-      '| keys =', shareIntent ? Object.keys(shareIntent).join(',') : 'null');
-  }, [hasShareIntent, shareIntent]);
-
   useEffect(() => {
     if (!hasShareIntent) return;
     (async () => {
       try {
         const text = shareIntent?.text || shareIntent?.webUrl || '';
         const files = shareIntent?.files || [];
-        console.warn('[share] handling: textLen =', text.length,
-          '| files =', files.length);
 
         if (text) {
           // ── Shared text (Apple Notes, Simplenote, Keep, ...) ──
@@ -62,7 +53,6 @@ function RootNav() {
             bodyText = rest.join('\n');
           }
           const newId = createNote({ title, body: bodyText });
-          console.warn('[share] createNote returned', typeof newId, newId);
           // Open the new note. Delay lets any share-URL redirect settle first
           // so this push lands cleanly on top.
           if (typeof newId === 'string') {
