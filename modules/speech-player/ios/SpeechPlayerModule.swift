@@ -492,6 +492,14 @@ public class SpeechPlayerModule: Module {
       let steps = (options["steps"] as? Int) ?? 8
       let speed = Float((options["speed"] as? Double) ?? 1.0)
       let language = (options["language"] as? String) ?? "en"
+
+      // Stop whatever is already rendering. The engine is a serial queue with
+      // a `running` guard, and since the background render became uncapped it
+      // can hold that queue for MINUTES. Without this, opening a second note
+      // queued behind the first note's entire render — measured at over forty
+      // seconds of spinner before playback could even begin.
+      self.supertonic?.cancel()
+
       // <= 0 means no budget: render the whole note. Opening a note now
       // starts a full background render, so that by the time the reader wants
       // to listen the audio already exists and no scrub has to wait.
@@ -1408,6 +1416,14 @@ public class SpeechPlayerModule: Module {
         // the scrub path needs both edges to know whether a target is
         // reachable by seeking or needs a new render.
         "renderedFrom": self.compositionStart,
+        // What can actually be SEEKED to, which is not the same as what has
+        // been rendered. `rendered` counts pending segments so the buffered
+        // bar can show audio that exists; those segments are not in the
+        // composition yet, because flushPending holds them back until the
+        // buffer ahead of the play head runs down. Seeking into them lands
+        // past the end of the item — which is why a scrub forward jumped
+        // back to where playback already was.
+        "seekable": self.compositionStart + self.renderedDuration,
       ])
       self.maintainPlayback(elapsed: elapsed)
       // Keep the lock screen / CarPlay scrubber honest without a full push.
