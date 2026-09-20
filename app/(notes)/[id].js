@@ -217,6 +217,9 @@ export default function EditorScreen() {
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   const [progress, setProgress] = useState(0);
   const [voiceOn, setVoiceOn] = useState(false);
+  // Voice follow stopped on its own. Shown on the mic button rather than in
+  // a dialog — see the follow error handler.
+  const [voiceFailed, setVoiceFailed] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const bodyInputRef = useRef(null);
 
@@ -587,6 +590,23 @@ export default function EditorScreen() {
     return () => clearTimeout(t);
   }, [id, editing, listening, body]);
 
+  // An empty bar has to look like a bar.
+  //
+  // colors.border against colors.bg measures 1.22 contrast in dark and 1.23
+  // in light — the same number — but low contrast reads far worse at the dark
+  // end, and in dark mode the track simply vanished until audio had played.
+  // A lighter slate takes it to 2.36 there; light mode is left alone.
+  const trackColor = isDarkTheme ? '#475569' : colors.border;
+
+  // Voice-follow failure, shown on the mic button. Literal colours, not
+  // palette keys: the four themes have no warning colour and a missing key
+  // resolves to undefined, which renders as nothing. A dark red measured
+  // 2.76 against the dark theme's near-black surface versus 6.47 in light,
+  // so dark gets a lighter one — both land near 6.5.
+  const VOICE_FAIL = isDarkTheme ? '#f87171' : '#b91c1c';
+  const VOICE_FAIL_FILL = isDarkTheme
+    ? 'rgba(248,113,113,0.16)' : 'rgba(185,28,28,0.12)';
+
   // Smallest width the buffered window is drawn at, so "the engine is
   // working ahead of you" stays visible on a long note even when the buffer
   // is a couple of percent of it.
@@ -873,9 +893,16 @@ export default function EditorScreen() {
       );
       return;
     }
-    if (message) {
-      Alert.alert('Voice follow', message);
-    }
+    // NO ALERT. Everything below this point can only happen while voice
+    // follow is running, which means the reader is at a podium in front of
+    // people. A modal dialog there is worse than the failure it reports: it
+    // covers the script, and it has to be dismissed before the talk can go
+    // on. The mic button turning red says the same thing to the one person
+    // who needs to know, and says nothing to the room.
+    //
+    // Dictation-disabled keeps its alert because it can only fire on a Mac,
+    // at a desk, where the fix is one toggle and impossible to guess.
+    setVoiceFailed(true);
   }
 
   // Find the script-word index that matches wherever the reader is currently
@@ -973,7 +1000,7 @@ export default function EditorScreen() {
   }
 
   function toggleVoice() {
-    if (voiceOn) stopVoice(); else startVoice();
+    if (voiceOn) stopVoice(); else { setVoiceFailed(false); startVoice(); }
   }
 
   // ── Mode transitions ──
@@ -1659,7 +1686,7 @@ export default function EditorScreen() {
               {...(listening ? hudPan.current.panHandlers : {})}
             >
               <View
-                style={[styles.hudTrack, { backgroundColor: colors.border }]}
+                style={[styles.hudTrack, { backgroundColor: trackColor }]}
                 onLayout={e => { hudBarRef.current.w = e.nativeEvent.layout.width; }}
               >
                 {/* The buffered region is a WINDOW, not a span from the
@@ -1744,16 +1771,19 @@ export default function EditorScreen() {
           ) : SHOW_VOICE_PLACEHOLDER && (
             <TouchableOpacity
               style={[styles.hudRound, {
-                backgroundColor: voiceOn ? colors.accent : colors.surface,
-                borderColor: voiceOn ? colors.accentBorder : colors.border,
+                backgroundColor: voiceOn ? colors.accent
+                  : voiceFailed ? VOICE_FAIL_FILL : colors.surface,
+                borderColor: voiceOn ? colors.accentBorder
+                  : voiceFailed ? VOICE_FAIL : colors.border,
               }]}
               onPress={toggleVoice}
               hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
             >
               <SymbolView
-                name={voiceOn ? 'mic.fill' : 'mic'}
+                name={voiceOn ? 'mic.fill' : voiceFailed ? 'mic.slash' : 'mic'}
                 size={ui(22)}
-                tintColor={voiceOn ? colors.accentText : colors.textMuted}
+                tintColor={voiceOn ? colors.accentText
+                  : voiceFailed ? VOICE_FAIL : colors.textMuted}
                 type="monochrome"
               />
             </TouchableOpacity>

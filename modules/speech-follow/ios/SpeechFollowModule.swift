@@ -42,7 +42,32 @@ public class SpeechFollowModule: Module {
   // restart loop holding the microphone open. Counting consecutive failures
   // with no transcript in between distinguishes the two.
   private var consecutiveFailures = 0
-  private static let maxConsecutiveFailures = 3
+  private static let maxConsecutiveFailures = 8
+
+  /// Errors that mean "nothing was said", not "recognition is broken".
+  ///
+  /// A tester reported voice follow working through every rehearsal at home
+  /// and failing at the podium. Silence is the difference: at home you tap
+  /// start and speak immediately, while at a lectern there is a gap — being
+  /// introduced, walking up, a breath before the first line. SFSpeechRecognizer
+  /// reports that silence as an error, and counting it as a failure ended the
+  /// session after three quiet cycles, before a word was spoken.
+  ///
+  /// These are cycled like any completed task, without counting against the
+  /// failure budget.
+  private static func isSilenceError(_ error: NSError) -> Bool {
+    // kAFAssistantErrorDomain 1110 "No speech detected", 203 "Retry",
+    // 216 cancellation during a cycle.
+    if error.domain == "kAFAssistantErrorDomain" {
+      return error.code == 1110 || error.code == 203 || error.code == 216
+    }
+    // SFSpeechRecognizer surfaces the same condition through its own domain
+    // on some releases.
+    if error.domain == "com.apple.speech.recognition.AFAssistantErrorDomain" {
+      return error.code == 1110 || error.code == 203
+    }
+    return false
+  }
 
   public func definition() -> ModuleDefinition {
     Name("SpeechFollow")
@@ -176,7 +201,17 @@ public class SpeechFollowModule: Module {
       }
 
       if let error = error {
-        NSLog("[sf] recognition error: \(error.localizedDescription)")
+        let ns = error as NSError
+        NSLog("[sf] recognition error: \(ns.domain) \(ns.code) — \(error.localizedDescription)")
+
+        // Silence is not a failure. Cycle and keep listening — after a
+        // short pause, because a silence error can return immediately and
+        // restarting with no delay would spin the recognizer hot through a
+        // long gap before the speaker begins.
+        if Self.isSilenceError(ns) {
+          self.cycleTask(after: 0.4)
+          return
+        }
 
         // macOS routes SFSpeechRecognizer through the Dictation service. With
         // Dictation switched off in System Settings every task fails
@@ -212,7 +247,17 @@ public class SpeechFollowModule: Module {
   private func configureRecordSession() {
     let session = AVAudioSession.sharedInstance()
     do {
-      try session.setCategory(.record, mode: .measurement, options: [.duckOthers])
+      // .default, not .measurement.
+      //
+      // Apple's sample code uses .measurement, which disables the input
+      // processing chain — including automatic gain control — to give the
+      // recognizer raw audio. That is right for a phone held close to the
+      // mouth, and wrong for a device on a lectern: at arm's length, with
+      // room reverb and a PA putting the speaker's own voice back into the
+      // room, the signal is quieter and messier, and AGC is exactly what
+      // compensates. A tester's live failure after clean rehearsals is the
+      // shape of problem this produces.
+      try session.setCategory(.record, mode: .default, options: [.duckOthers])
       try session.setActive(true, options: .notifyOthersOnDeactivation)
     } catch {
       NSLog("[sf] audio session unavailable (continuing): \(error.localizedDescription)")
@@ -220,8 +265,14 @@ public class SpeechFollowModule: Module {
   }
 
   // Recognition tasks are time-limited; restart to keep following a long talk.
-  private func cycleTask() {
+  private func cycleTask(after delay: TimeInterval = 0) {
     guard listening else { return }
+    if delay > 0 {
+      DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+        self?.cycleTask()
+      }
+      return
+    }
     audioEngine.stop()
     audioEngine.inputNode.removeTap(onBus: 0)
     request?.endAudio(); request = nil
