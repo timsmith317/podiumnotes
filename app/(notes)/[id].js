@@ -454,37 +454,50 @@ export default function EditorScreen() {
     setEditFocused(false);     // park: the body becomes scrollable text
   }
 
-  /// The character offset of the line under a tap, in content coordinates.
+  /// The character offset under a tap.
   ///
-  /// onTextLayout gives each line its y, height and text but not its offset, so
-  /// the offsets are walked the same way editorLineForOffset walks them —
-  /// indexOf from the running position, which tolerates the duplicate-line case
-  /// that a naive length sum does not.
-  function offsetAtContentY(contentY) {
-    const lines = linesRef.current || [];
+  /// Restored from the pre-unification editor, where tap-to-edit was
+  /// character-accurate and one tap was enough. The unified presenter/editor
+  /// commit dropped it, and a line-only replacement is why the caret had
+  /// nowhere precise to land and a second tap was needed to place it.
+  ///
+  /// onTextLayout gives each line its frame and text. The line comes from the
+  /// tap's y, and the character within it from how far across the line's width
+  /// the x fell — an estimate that assumes even character widths, which is
+  /// close enough that the caret lands in the right word. Offsets are walked
+  /// with indexOf from the running position rather than by summing lengths, so
+  /// a line repeated in the note cannot throw the count off.
+  function offsetFromTap(locationX, locationY) {
+    const lines = linesRef.current;
+    if (!lines || !lines.length) return body.length;
+    let li = lines.findIndex(l => locationY >= l.y && locationY <= l.y + l.height);
+    if (li === -1) li = locationY < lines[0].y ? 0 : lines.length - 1;
+    const line = lines[li];
+    const lt = line.text || '';
+    const frac = line.width > 0
+      ? Math.min(Math.max((locationX - line.x) / line.width, 0), 1)
+      : 0;
+    const charInLine = Math.round(frac * lt.length);
     let pos = 0;
-    let best = 0;
-    for (const ln of lines) {
-      const t = ln.text || '';
+    for (let i = 0; i < li; i++) {
+      const t = lines[i].text || '';
       const found = body.indexOf(t, pos);
-      const start = found === -1 ? pos : found;
-      if (contentY >= ln.y && contentY <= ln.y + ln.height) return start;
-      if (ln.y <= contentY) best = start;      // nearest line above the tap
-      pos = start + t.length;
+      pos = found === -1 ? pos + t.length : found + t.length;
       if (body[pos] === '\n') pos += 1;
     }
-    return best;
+    const foundLine = body.indexOf(lt, pos);
+    const lineStart = foundLine === -1 ? pos : foundLine;
+    return Math.min(lineStart + charInLine, body.length);
   }
 
   // Tapping parked text resumes editing with the caret where the finger went.
-  function resumeEditAtY(localY) {
-    const offset = offsetAtContentY(localY);
+  function resumeEditAtTap(e) {
+    const { locationX, locationY } = e.nativeEvent;
+    const offset = offsetFromTap(locationX, locationY);
     editPinYRef.current = scrollYRef.current;   // the view must not move
     setSel({ start: offset, end: offset });
     setEditFocused(true);
   }
-
-  // Hold the scroll across a refocus until the keyboard has finished moving.
   //
   // With the keyboard collapsed the body is still a TextInput covering the
   // page, so a touch meant as a scroll refocuses it, and iOS scrolls to reveal
@@ -1666,7 +1679,7 @@ export default function EditorScreen() {
         {editing && !editFocused ? (
           // PARKED — plain text, so the ScrollView owns every touch. Tapping
           // returns to the field with the caret on the tapped line.
-          <Pressable onPress={e => resumeEditAtY(e.nativeEvent.locationY)}>
+          <Pressable onPress={resumeEditAtTap} style={styles.bodyPress}>
             <Text
               onTextLayout={e => { linesRef.current = e.nativeEvent.lines; computeLineStarts(); }}
               style={bodyStyle}
@@ -1969,6 +1982,8 @@ const styles = StyleSheet.create({
 
   // Body input (shares bodyStyle with the present-mode Text; padding must be
   // 0 so the two render at identical positions)
+  // Fills the scroll area so a tap below the last line still lands.
+  bodyPress: { flexGrow: 1, minHeight: 320 },
   bodyInput: { padding: 0 },
   kbDismiss: {
     position: 'absolute',
