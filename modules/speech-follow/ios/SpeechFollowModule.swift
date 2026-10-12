@@ -44,6 +44,29 @@ public class SpeechFollowModule: Module {
   private var consecutiveFailures = 0
   private static let maxConsecutiveFailures = 8
 
+  // A recognition task's completion handler outlives the task.
+  //
+  // cycleTask() calls task.cancel(), and cancelling fires the handler once
+  // more with kAFAssistantErrorDomain 216 — which isSilenceError treats as
+  // silence, so it scheduled ANOTHER cycle 0.4s later. That delayed cycle
+  // then landed on the freshly started task and tore it down. Nothing in the
+  // handler identified which task it belonged to, so a dead task could keep
+  // operating on the live session. Most cycles survived it; occasionally the
+  // interleaving left no tap, no task, and `listening` still true — a silent
+  // death with no error event, which is why the microphone button never went
+  // red and nothing brought it back. A talk long enough to cycle a few
+  // hundred times is where that lands, around eight or nine minutes in.
+  //
+  // Each task now carries the generation it was started under, and a handler
+  // from any earlier generation returns immediately.
+  private var taskGeneration = 0
+
+  // When the recognizer last said anything at all — a result OR an error.
+  // Silence between sentences still produces errors, so no callbacks for ten
+  // seconds means the session is wedged rather than quiet.
+  private var lastActivityAt = CFAbsoluteTimeGetCurrent()
+  private static let stallTimeout: Double = 10.0
+
   /// Errors that mean "nothing was said", not "recognition is broken".
   ///
   /// A tester reported voice follow working through every rehearsal at home
@@ -150,6 +173,7 @@ public class SpeechFollowModule: Module {
     listening = true
     consecutiveFailures = 0
     try startTask()
+    scheduleStallCheck()
     sendEvent("onStatus", ["listening": true])
   }
 
@@ -193,8 +217,16 @@ public class SpeechFollowModule: Module {
       throw error
     }
 
+    taskGeneration += 1
+    let gen = taskGeneration
+    lastActivityAt = CFAbsoluteTimeGetCurrent()
+
     task = recognizer?.recognitionTask(with: req) { [weak self] result, error in
       guard let self = self else { return }
+      // A handler from a task that has already been cycled must not touch the
+      // session that replaced it.
+      guard gen == self.taskGeneration else { return }
+      self.lastActivityAt = CFAbsoluteTimeGetCurrent()
       if let result = result {
         self.consecutiveFailures = 0     // progress: the cycle is healthy
         self.sendEvent("onTranscript", ["text": result.bestTranscription.formattedString])
@@ -273,6 +305,15 @@ public class SpeechFollowModule: Module {
       }
       return
     }
+    // Recognition callbacks arrive on an arbitrary queue, and this mutates the
+    // audio engine and the task. One queue for all of it.
+    if !Thread.isMainThread {
+      DispatchQueue.main.async { [weak self] in self?.cycleTask() }
+      return
+    }
+    // Invalidate BEFORE cancelling: cancel() fires the old handler, and that
+    // handler must not be able to cycle the task this call is about to start.
+    taskGeneration += 1
     audioEngine.stop()
     audioEngine.inputNode.removeTap(onBus: 0)
     request?.endAudio(); request = nil
@@ -282,8 +323,29 @@ public class SpeechFollowModule: Module {
     }
   }
 
+  /// Restart the session if the recognizer stops reporting anything.
+  ///
+  /// The generation guard above fixes the race that was losing sessions, but a
+  /// microphone can also be taken by a phone call, a Bluetooth handoff or the
+  /// system, and a presenter will not notice a dead feature until the text
+  /// stops moving. Checking that callbacks are still arriving makes voice
+  /// follow recover on its own whatever stopped it — which matters more at a
+  /// podium than knowing why it stopped.
+  private func scheduleStallCheck() {
+    DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
+      guard let self = self, self.listening else { return }
+      if CFAbsoluteTimeGetCurrent() - self.lastActivityAt > Self.stallTimeout {
+        NSLog("[sf] no recognition activity for %.0fs — restarting", Self.stallTimeout)
+        self.lastActivityAt = CFAbsoluteTimeGetCurrent()
+        self.cycleTask()
+      }
+      self.scheduleStallCheck()
+    }
+  }
+
   private func endSession() {
     listening = false
+    taskGeneration += 1        // orphan any handler still in flight
     if audioEngine.isRunning {
       audioEngine.stop()
       audioEngine.inputNode.removeTap(onBus: 0)
