@@ -40,6 +40,9 @@ public class SpeechPlayerModule: Module {
   // second and is additionally muted for 0.8s after a swap, so a bare
   // lastElapsed can be well over a second behind the play head.
   private var lastElapsedAt: Double = CFAbsoluteTimeGetCurrent()
+  // seekGeneration as of the last accepted progress tick, so a backward
+  // step can be told from a deliberate seek.
+  private var lastTickGeneration = 0
   // Bumped on every user seek. A swap seeks its new item asynchronously
   // before installing it; if a seek lands in that window, the swap would
   // otherwise install an item positioned at the PRE-seek time and silently
@@ -872,6 +875,9 @@ public class SpeechPlayerModule: Module {
       // Park at the buffer edge and wait — the next appended segment
       // resumes playback from here.
       if !self.renderComplete {
+        NSLog("[SpeechPlayer] UNDERRUN at %.1f (rendered %.1f from %.1f, est %.1f)",
+              self.lastElapsed, self.renderedDuration, self.compositionStart,
+              self.estimatedDuration)
         self.underrun = true
         self.pushNowPlaying(playing: false)
         self.sendEvent("onState", ["state": "buffering"])
@@ -883,6 +889,9 @@ public class SpeechPlayerModule: Module {
         self.player?.rate = self.playbackRate
         self.pushNowPlaying(playing: true)
       } else {
+        NSLog("[SpeechPlayer] FINISHED at %.1f (rendered %.1f from %.1f, est %.1f, duration %.1f)",
+              self.lastElapsed, self.renderedDuration, self.compositionStart,
+              self.estimatedDuration, self.duration)
         self.player?.seek(to: .zero)
         self.pushNowPlaying(playing: false)
         self.sendEvent("onState", ["state": "finished"])
@@ -1135,6 +1144,9 @@ public class SpeechPlayerModule: Module {
       return
     }
 
+    NSLog("[SpeechPlayer] swap at %.1f (itemReady %d, rendered %.1f, complete %d)",
+          CMTimeGetSeconds(at), itemReady ? 1 : 0, renderedDuration,
+          renderComplete ? 1 : 0)
     let item = AVPlayerItem(asset: snapshot)
     // Seek the item BEFORE it goes live; replaceCurrentItem on an already
     // positioned item is near-instant.
@@ -1422,9 +1434,25 @@ public class SpeechPlayerModule: Module {
       // Drop ticks while a swap settles, or the scrubber jumps to zero and
       // back. Playback itself is unaffected.
       if CFAbsoluteTimeGetCurrent() < self.suppressProgressUntil { return }
-      // Ticks during a swap are suppressed above, so this only ever records
-      // a real position — which is what makes it safe to trust when the
-      // player is mid-rebuild.
+
+      // Reject a tick that walks BACKWARDS while playing.
+      //
+      // The 0.8s suppression window assumes a swap settles inside it. When one
+      // takes longer, the first tick past the window still reads the new item
+      // before it has a position, and a near-zero went out as the note's
+      // elapsed time. Audio was unaffected — but the text followed it, jumping
+      // to the top of the note and then racing back down, twice in a
+      // twenty-minute listen. A seek is the only legitimate way back, and a
+      // seek bumps seekGeneration, so that is what tells the two apart.
+      if (self.player?.rate ?? 0) > 0,
+         self.seekGeneration == self.lastTickGeneration,
+         elapsed < self.lastElapsed - 1.0 {
+        NSLog("[SpeechPlayer] rejected backward tick: %.1f after %.1f",
+              elapsed, self.lastElapsed)
+        return
+      }
+      self.lastTickGeneration = self.seekGeneration
+
       self.lastElapsed = elapsed
       self.lastElapsedAt = CFAbsoluteTimeGetCurrent()
       // Audio is moving, so any underrun is over — this also catches the
