@@ -213,6 +213,24 @@ export default function EditorScreen() {
   // it to the band line. Without an explicit selection a focused multiline
   // TextInput defaults to caret-at-end, which is never what we want.
   const [sel, setSel] = useState(editing ? { start: 0, end: 0 } : null);
+  // Editing has TWO states, not one.
+  //
+  // FOCUSED: the body is a TextInput, the keyboard is up, taps move the
+  // caret natively. PARKED: the keyboard has been collapsed to see more of
+  // the note, and the body is a plain Text so a finger scrolls instead of
+  // refocusing a field. Tapping it returns to FOCUSED with the caret on the
+  // tapped line.
+  //
+  // One state was the whole problem. A collapsed keyboard left a TextInput
+  // covering the page, so a touch meant as a scroll refocused it and iOS
+  // scrolled to reveal the caret — wherever the last edit happened, which
+  // after deleting the opening line is the very top. Two attempts at pinning
+  // the scroll across that focus both lost: iOS's reveal is animated and
+  // outlives any fixed window, and fighting it is the wrong layer. Not being
+  // a text field is what stops the focus happening at all — which is why
+  // keeping the keyboard up always felt correct, at the cost of most of the
+  // screen.
+  const [editFocused, setEditFocused] = useState(true);
   const [keyboardVisible, setKeyboardVisible] = useState(false);
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   const [progress, setProgress] = useState(0);
@@ -433,6 +451,37 @@ export default function EditorScreen() {
   function collapseKeyboard() {
     bodyInputRef.current?.blur();
     Keyboard.dismiss();
+    setEditFocused(false);     // park: the body becomes scrollable text
+  }
+
+  /// The character offset of the line under a tap, in content coordinates.
+  ///
+  /// onTextLayout gives each line its y, height and text but not its offset, so
+  /// the offsets are walked the same way editorLineForOffset walks them —
+  /// indexOf from the running position, which tolerates the duplicate-line case
+  /// that a naive length sum does not.
+  function offsetAtContentY(contentY) {
+    const lines = linesRef.current || [];
+    let pos = 0;
+    let best = 0;
+    for (const ln of lines) {
+      const t = ln.text || '';
+      const found = body.indexOf(t, pos);
+      const start = found === -1 ? pos : found;
+      if (contentY >= ln.y && contentY <= ln.y + ln.height) return start;
+      if (ln.y <= contentY) best = start;      // nearest line above the tap
+      pos = start + t.length;
+      if (body[pos] === '\n') pos += 1;
+    }
+    return best;
+  }
+
+  // Tapping parked text resumes editing with the caret where the finger went.
+  function resumeEditAtY(localY) {
+    const offset = offsetAtContentY(localY);
+    editPinYRef.current = scrollYRef.current;   // the view must not move
+    setSel({ start: offset, end: offset });
+    setEditFocused(true);
   }
 
   // Hold the scroll across a refocus until the keyboard has finished moving.
@@ -470,11 +519,14 @@ export default function EditorScreen() {
   // On entering edit mode, release the controlled selection after a short
   // delay so the user can move the caret freely. iOS places the caret from
   // the `selection` prop on focus; after that the native input owns it.
+  // Also runs when resuming from PARKED, where `editing` never changes: the
+  // controlled selection places the caret on the tapped line and then has to be
+  // released, or the caret is frozen there and cannot be moved.
   useEffect(() => {
-    if (!editing) return;
+    if (!editing || !editFocused) return;
     const tc = setTimeout(() => setSel(null), 350);
     return () => clearTimeout(tc);
-  }, [editing]);
+  }, [editing, editFocused]);
 
   // Pin insurance across the mode swap (see editPinYRef).
   useEffect(() => {
@@ -1045,6 +1097,7 @@ export default function EditorScreen() {
     if (__DEV__) console.log('[unified] enterEdit: scrollY', Math.round(scrollYRef.current), '→ caret', start);
     editPinYRef.current = scrollYRef.current;
     setSel({ start, end: start });
+    setEditFocused(true);
     setEditing(true);
   }
 
@@ -1610,7 +1663,18 @@ export default function EditorScreen() {
           saveScrollTimer.current = setTimeout(() => setScroll(id, y), 400);
         }}
       >
-        {editing ? (
+        {editing && !editFocused ? (
+          // PARKED — plain text, so the ScrollView owns every touch. Tapping
+          // returns to the field with the caret on the tapped line.
+          <Pressable onPress={e => resumeEditAtY(e.nativeEvent.locationY)}>
+            <Text
+              onTextLayout={e => { linesRef.current = e.nativeEvent.lines; computeLineStarts(); }}
+              style={bodyStyle}
+            >
+              {body}
+            </Text>
+          </Pressable>
+        ) : editing ? (
           <TextInput
             ref={bodyInputRef}
             autoFocus
