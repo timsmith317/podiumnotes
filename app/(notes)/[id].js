@@ -494,39 +494,12 @@ export default function EditorScreen() {
   function resumeEditAtTap(e) {
     const { locationX, locationY } = e.nativeEvent;
     const offset = offsetFromTap(locationX, locationY);
-    editPinYRef.current = scrollYRef.current;   // the view must not move
+    // No scroll pin here. The tap lands on a line the reader can already see,
+    // so the caret reveal has nothing to reveal and nothing to contest — and a
+    // pin running while the field mounts is what was eating the caret, turning
+    // one tap into two.
     setSel({ start: offset, end: offset });
     setEditFocused(true);
-  }
-  //
-  // With the keyboard collapsed the body is still a TextInput covering the
-  // page, so a touch meant as a scroll refocuses it, and iOS scrolls to reveal
-  // the caret — which sits wherever the last edit happened. Delete the opening
-  // line, collapse the keyboard, reach down to scroll, and the note snaps back
-  // to the top. With the keyboard already up there is no refocus, which is
-  // exactly why that case has always felt right.
-  //
-  // This was tuned once before and regressed. Two things were learned then and
-  // are rebuilt here rather than guessed at again. The window has to outlast
-  // the keyboard animation — around 250ms, so a pin that stops at 150 loses to
-  // the late caret-reveal. And it has to CANCEL the moment the reader drags,
-  // or it fights them, which is the worse failure of the two. editPinYRef is
-  // that cancel: onScrollBeginDrag clears it and every tick checks it.
-  //
-  // Magnitude is deliberately not consulted. An earlier attempt only undid
-  // jumps larger than a viewport, reasoning that smaller ones were keyboard
-  // avoidance — but a one-screen scroll followed by a snap back to the caret
-  // is under that threshold and is precisely the complaint.
-  function pinScrollAcrossFocus() {
-    const y = scrollYRef.current;
-    editPinYRef.current = y;
-    const pin = () => {
-      if (editPinYRef.current == null) return;   // the reader took over
-      scrollRef.current?.scrollTo({ y, animated: false });
-    };
-    requestAnimationFrame(pin);
-    [60, 150, 280, 420, 560].forEach(ms => setTimeout(pin, ms));
-    setTimeout(() => { if (editPinYRef.current === y) editPinYRef.current = null; }, 640);
   }
 
   // On entering edit mode, release the controlled selection after a short
@@ -1691,7 +1664,6 @@ export default function EditorScreen() {
           <TextInput
             ref={bodyInputRef}
             autoFocus
-            onFocus={pinScrollAcrossFocus}
             selection={sel ?? undefined}
             style={[bodyStyle, styles.bodyInput]}
             value={body}
