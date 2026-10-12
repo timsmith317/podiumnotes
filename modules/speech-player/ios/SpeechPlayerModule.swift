@@ -36,6 +36,10 @@ public class SpeechPlayerModule: Module {
   // was fine, which is why play resumed correctly, but the car showed 0:00
   // about ten seconds after every pause.
   private var lastElapsed: Double = 0
+  // When lastElapsed was recorded. The periodic observer ticks twice a
+  // second and is additionally muted for 0.8s after a swap, so a bare
+  // lastElapsed can be well over a second behind the play head.
+  private var lastElapsedAt: Double = CFAbsoluteTimeGetCurrent()
   // Bumped on every user seek. A swap seeks its new item asynchronously
   // before installing it; if a seek lands in that window, the swap would
   // otherwise install an item positioned at the PRE-seek time and silently
@@ -560,6 +564,7 @@ public class SpeechPlayerModule: Module {
         do {
           try self.teardownPlayer(deactivateSession: false)
           self.lastElapsed = 0        // a new note starts at the beginning
+          self.lastElapsedAt = CFAbsoluteTimeGetCurrent()
           self.compositionStart = 0   // the single-file path is never offset
           self.configureAudioSession()
 
@@ -610,6 +615,7 @@ public class SpeechPlayerModule: Module {
         // re-rendering from the target instead.
         let target = max(0, seconds - self.compositionStart)
         self.lastElapsed = target
+        self.lastElapsedAt = CFAbsoluteTimeGetCurrent()
         self.seekGeneration += 1
         // ZERO TOLERANCE. Without it AVFoundation is free to land on a
         // convenient boundary, and in a composition of concatenated AAC
@@ -642,6 +648,7 @@ public class SpeechPlayerModule: Module {
       DispatchQueue.main.async {
         try? self.teardownPlayer(deactivateSession: true)
         self.lastElapsed = 0
+        self.lastElapsedAt = CFAbsoluteTimeGetCurrent()
         self.sendEvent("onState", ["state": "stopped"])
       }
     }
@@ -924,6 +931,7 @@ public class SpeechPlayerModule: Module {
     lastSegmentAt = CFAbsoluteTimeGetCurrent()
     compositionStart = max(0, startSeconds)
     lastElapsed = 0
+    lastElapsedAt = CFAbsoluteTimeGetCurrent()
     estimatedDuration = estimated
     currentTitle = title
     duration = estimated
@@ -1058,6 +1066,27 @@ public class SpeechPlayerModule: Module {
     pushNowPlaying(playing: false)
   }
 
+  /// Where the play head actually is, when the item cannot be asked.
+  ///
+  /// A swap falls back to lastElapsed because currentTime() reads 0 on an item
+  /// that isn't readyToPlay — which is its state right after the previous
+  /// swap. But lastElapsed is only refreshed twice a second and is muted for
+  /// 0.8s after each swap, so using it raw repositioned playback up to about a
+  /// second and a half behind where it had reached. That is a word or two
+  /// repeated at every swap, which on a long note is every couple of minutes —
+  /// reported from the car as an audio hiccup and mistaken for a buffering
+  /// fault.
+  ///
+  /// Only extrapolate while the clock is genuinely running: paused, and parked
+  /// at the buffer edge in an underrun, lastElapsed is already correct and
+  /// adding wall time to it would skip audio instead of repeating it.
+  private func elapsedEstimate() -> Double {
+    guard let p = player, p.rate > 0 else { return lastElapsed }
+    let age = CFAbsoluteTimeGetCurrent() - lastElapsedAt
+    guard age.isFinite, age > 0, age < 5 else { return lastElapsed }
+    return lastElapsed + age * Double(p.rate)
+  }
+
   /// Swap in a player item that includes the newly appended audio, waiting
   /// for a paragraph gap so the transition falls in silence.
   private func scheduleSwap() {
@@ -1085,8 +1114,9 @@ public class SpeechPlayerModule: Module {
     // first render could resume from 0:00. lastElapsed only ever records a
     // settled position, so it's the safer source when the item isn't ready.
     let itemReady = p.currentItem?.status == .readyToPlay
-    let atSeconds = itemReady ? CMTimeGetSeconds(p.currentTime()) : lastElapsed
-    let at = CMTime(seconds: max(0, atSeconds.isFinite ? atSeconds : lastElapsed),
+    let fallback = elapsedEstimate()
+    let atSeconds = itemReady ? CMTimeGetSeconds(p.currentTime()) : fallback
+    let at = CMTime(seconds: max(0, atSeconds.isFinite ? atSeconds : fallback),
                     preferredTimescale: 600)
 
     // Prefer to swap inside a paragraph gap, where the seam is inaudible —
@@ -1153,6 +1183,16 @@ public class SpeechPlayerModule: Module {
   /// becomes ready. Returns via Now Playing and, for a recovery from an
   /// underrun, an onState event so the UI can drop "Catching up…".
   private func startPlayback(_ p: AVPlayer, announce: Bool, attempt: Int = 0) {
+    // Reactivate the session before asking for rate.
+    //
+    // An interruption — a CarPlay navigation prompt, Siri, an incoming call —
+    // deactivates the audio session, and setting rate on a player whose
+    // session is inactive is silently dropped exactly like setting it on an
+    // item that isn't ready. The retry below then spun for fifteen seconds
+    // against a condition no amount of waiting could change, and playback
+    // stopped for good. Only on the first attempt: setActive is cheap but
+    // not free, and the retries are a readiness problem, not a session one.
+    if attempt == 0 { configureAudioSession() }
     p.rate = playbackRate
     if p.rate > 0 {
       if announce || underrun {
@@ -1386,6 +1426,7 @@ public class SpeechPlayerModule: Module {
       // a real position — which is what makes it safe to trust when the
       // player is mid-rebuild.
       self.lastElapsed = elapsed
+      self.lastElapsedAt = CFAbsoluteTimeGetCurrent()
       // Audio is moving, so any underrun is over — this also catches the
       // race where the end-of-item notice lands just after a swap.
       if self.underrun, (self.player?.rate ?? 0) > 0 {
@@ -1441,14 +1482,19 @@ public class SpeechPlayerModule: Module {
             let type = AVAudioSession.InterruptionType(rawValue: typeRaw) else { return }
       switch type {
       case .began:
+        // iOS has already silenced us; make the player agree, so rate and
+        // reported state cannot drift apart.
+        self.player?.pause()
         self.pushNowPlaying(playing: false)
         self.sendEvent("onState", ["state": "paused"])
       case .ended:
         let optRaw = (info[AVAudioSessionInterruptionOptionKey] as? UInt) ?? 0
-        if AVAudioSession.InterruptionOptions(rawValue: optRaw).contains(.shouldResume) {
-          self.player?.rate = self.playbackRate
-          self.pushNowPlaying(playing: true)
-          self.sendEvent("onState", ["state": "playing"])
+        if AVAudioSession.InterruptionOptions(rawValue: optRaw).contains(.shouldResume),
+           let p = self.player {
+          // Through startPlayback: the session needs reactivating and the
+          // item may not be ready. A bare rate assignment here is what left
+          // a drive-time listen dead after a navigation prompt.
+          self.startPlayback(p, announce: true)
         }
       @unknown default: break
       }
@@ -1474,10 +1520,11 @@ public class SpeechPlayerModule: Module {
     let center = MPRemoteCommandCenter.shared()
 
     center.playCommand.addTarget { [weak self] _ in
-      guard let self = self, self.player != nil else { return .noActionableNowPlayingItem }
-      self.player?.rate = self.playbackRate
-      self.pushNowPlaying(playing: true)
-      self.sendEvent("onState", ["state": "playing"])
+      guard let self = self, let p = self.player else { return .noActionableNowPlayingItem }
+      // Pressing play on the steering wheel after an interruption has to
+      // reactivate the session first, which a bare rate assignment never did —
+      // the button appeared to work and nothing came out of the speakers.
+      self.startPlayback(p, announce: true)
       return .success
     }
     center.pauseCommand.addTarget { [weak self] _ in
@@ -1492,8 +1539,7 @@ public class SpeechPlayerModule: Module {
         p.pause(); self.pushNowPlaying(playing: false)
         self.sendEvent("onState", ["state": "paused"])
       } else {
-        p.rate = self.playbackRate; self.pushNowPlaying(playing: true)
-        self.sendEvent("onState", ["state": "playing"])
+        self.startPlayback(p, announce: true)
       }
       return .success
     }
@@ -1509,14 +1555,21 @@ public class SpeechPlayerModule: Module {
     center.skipForwardCommand.preferredIntervals = [15]
     center.skipForwardCommand.addTarget { [weak self] _ in
       guard let self = self, let p = self.player else { return .noActionableNowPlayingItem }
-      let t = min(self.duration, CMTimeGetSeconds(p.currentTime()) + 15)
+      // Clamp in PLAYER time. self.duration is note time, and after a scrub
+      // the two differ by compositionStart — which let a skip seek past the
+      // end of the item.
+      let playerEnd = max(0, self.duration - self.compositionStart)
+      let t = min(playerEnd, CMTimeGetSeconds(p.currentTime()) + 15)
       p.seek(to: CMTime(seconds: t, preferredTimescale: 600))
       return .success
     }
     center.changePlaybackPositionCommand.addTarget { [weak self] event in
       guard let self = self, let p = self.player,
             let e = event as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
-      p.seek(to: CMTime(seconds: e.positionTime, preferredTimescale: 600))
+      // The car's scrubber reports NOTE time, because that is what
+      // pushNowPlaying publishes. The player wants player time.
+      p.seek(to: CMTime(seconds: max(0, e.positionTime - self.compositionStart),
+                        preferredTimescale: 600))
       return .success
     }
   }
