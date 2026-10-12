@@ -75,14 +75,33 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     // Carry a cold-start URL through so Linking.getInitialURL() resolves —
     // this is how a share-sheet redirect arrives when the app was not running.
     var launchOptions: [UIApplication.LaunchOptionsKey: Any] = [:]
-    if let url = connectionOptions.urlContexts.first?.url {
+    let coldURL = connectionOptions.urlContexts.first?.url
+    if let url = coldURL {
       launchOptions[.url] = url
+      NSLog("[scene] cold start URL: %@", url.absoluteString)
+    } else {
+      NSLog("[scene] cold start, no URL")
     }
 
     factory.startReactNative(
       withModuleName: "main",
       in: window,
       launchOptions: launchOptions)
+
+    // ALSO forward the cold URL through AppDelegate.
+    //
+    // launchOptions is enough for Linking.getInitialURL(), but it never runs
+    // ExpoAppDelegate's openURL subscribers — and expo-share-intent delivers
+    // through a subscriber. The warm path (scene openURLContexts, below) does
+    // call AppDelegate, which is why sharing worked when the app was already
+    // running and produced nothing when it was not. Same call, same ordering
+    // guarantees as the warm path, once the modules exist.
+    if let url = coldURL {
+      DispatchQueue.main.async {
+        NSLog("[scene] forwarding cold URL through AppDelegate")
+        _ = appDelegate.application(UIApplication.shared, open: url, options: [:])
+      }
+    }
 
     for activity in connectionOptions.userActivities {
       _ = appDelegate.application(
@@ -95,6 +114,7 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
   func scene(_ scene: UIScene, openURLContexts URLContexts: Set<UIOpenURLContext>) {
     guard let appDelegate = UIApplication.shared.delegate as? AppDelegate else { return }
     for context in URLContexts {
+      NSLog("[scene] warm URL: %@", context.url.absoluteString)
       _ = appDelegate.application(UIApplication.shared, open: context.url, options: [:])
     }
   }
