@@ -435,6 +435,38 @@ export default function EditorScreen() {
     Keyboard.dismiss();
   }
 
+  // Hold the scroll across a refocus until the keyboard has finished moving.
+  //
+  // With the keyboard collapsed the body is still a TextInput covering the
+  // page, so a touch meant as a scroll refocuses it, and iOS scrolls to reveal
+  // the caret — which sits wherever the last edit happened. Delete the opening
+  // line, collapse the keyboard, reach down to scroll, and the note snaps back
+  // to the top. With the keyboard already up there is no refocus, which is
+  // exactly why that case has always felt right.
+  //
+  // This was tuned once before and regressed. Two things were learned then and
+  // are rebuilt here rather than guessed at again. The window has to outlast
+  // the keyboard animation — around 250ms, so a pin that stops at 150 loses to
+  // the late caret-reveal. And it has to CANCEL the moment the reader drags,
+  // or it fights them, which is the worse failure of the two. editPinYRef is
+  // that cancel: onScrollBeginDrag clears it and every tick checks it.
+  //
+  // Magnitude is deliberately not consulted. An earlier attempt only undid
+  // jumps larger than a viewport, reasoning that smaller ones were keyboard
+  // avoidance — but a one-screen scroll followed by a snap back to the caret
+  // is under that threshold and is precisely the complaint.
+  function pinScrollAcrossFocus() {
+    const y = scrollYRef.current;
+    editPinYRef.current = y;
+    const pin = () => {
+      if (editPinYRef.current == null) return;   // the reader took over
+      scrollRef.current?.scrollTo({ y, animated: false });
+    };
+    requestAnimationFrame(pin);
+    [60, 150, 280, 420, 560].forEach(ms => setTimeout(pin, ms));
+    setTimeout(() => { if (editPinYRef.current === y) editPinYRef.current = null; }, 640);
+  }
+
   // On entering edit mode, release the controlled selection after a short
   // delay so the user can move the caret freely. iOS places the caret from
   // the `selection` prop on focus; after that the native input owns it.
@@ -1582,6 +1614,7 @@ export default function EditorScreen() {
           <TextInput
             ref={bodyInputRef}
             autoFocus
+            onFocus={pinScrollAcrossFocus}
             selection={sel ?? undefined}
             style={[bodyStyle, styles.bodyInput]}
             value={body}
