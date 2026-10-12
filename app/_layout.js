@@ -5,7 +5,8 @@ import { Stack, useRouter } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
-import { ShareIntentProvider, useShareIntent } from 'expo-share-intent';
+import { ShareIntentProvider, useShareIntent, ShareIntentModule } from 'expo-share-intent';
+import { markShareReady, takePendingSharePath } from '../lib/pendingShare';
 import { useColorScheme } from 'react-native';
 import * as FileSystem from 'expo-file-system/legacy';
 import { useSettings, themeColors } from '../lib/useSettings';
@@ -20,10 +21,34 @@ function RootNav() {
   const colorScheme = useColorScheme();
   const colors = themeColors(settings.themeMode, colorScheme);
 
-  const { hasShareIntent, shareIntent, resetShareIntent } = useShareIntent({
+  const { isReady, hasShareIntent, shareIntent, resetShareIntent } = useShareIntent({
     debug: false,
     resetOnBackground: true,
   });
+
+  // Drain a share that arrived before this hook existed.
+  //
+  // A cold launch from the share sheet runs +native-intent during router
+  // initialisation — before the hook has subscribed to the module's
+  // "onChange" event. getShareIntent() emits rather than returns, so that
+  // delivery was lost and the app opened to an empty list. Every warm test
+  // passed because a warm app is already subscribed, which is why this
+  // survived to release.
+  //
+  // isReady goes true once the listener is registered, so this is the first
+  // safe moment to ask again. markShareReady then switches +native-intent to
+  // delivering directly, so a payload is never handed over twice.
+  useEffect(() => {
+    if (!isReady) return;
+    markShareReady();
+    const pending = takePendingSharePath();
+    if (!pending) return;
+    try {
+      ShareIntentModule?.getShareIntent(pending);
+    } catch (e) {
+      console.warn('Share handoff failed:', e?.message || e);
+    }
+  }, [isReady]);
 
   useEffect(() => {
     if (!hasShareIntent) return;
