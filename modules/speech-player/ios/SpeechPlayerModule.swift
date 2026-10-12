@@ -892,7 +892,16 @@ public class SpeechPlayerModule: Module {
         NSLog("[SpeechPlayer] FINISHED at %.1f (rendered %.1f from %.1f, est %.1f, duration %.1f)",
               self.lastElapsed, self.renderedDuration, self.compositionStart,
               self.estimatedDuration, self.duration)
-        self.player?.seek(to: .zero)
+        // Leave the play head where it stopped.
+        //
+        // This used to rewind to zero, which is right if the talk genuinely
+        // ended and wrong every other time — and "every other time" includes
+        // a composition that ended early, which from here is indistinguishable
+        // from a real ending. Losing a listener's place in a twenty-minute
+        // sermon is a worse failure than any of the causes: the audio can
+        // recover, but a reader who has to hunt for where they were will stop
+        // using the feature. Starting over is a deliberate act, and Go To Top
+        // is already there for it.
         self.pushNowPlaying(playing: false)
         self.sendEvent("onState", ["state": "finished"])
       }
