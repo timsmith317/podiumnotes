@@ -24,7 +24,8 @@ build 13 after 2.0.0's 12.
 ## What's New (4000)
 
 ```
-2.0.1 fixes six problems found in real use since 2.0.
+2.0.1 fixes six problems found in real use since 2.0, and reclaims some
+disk along the way.
 
 • Sharing from Notes, Mail or Pages now works when Podium Notes is not
   already running. The note arrived only if the app happened to be open in
@@ -49,6 +50,10 @@ build 13 after 2.0.0's 12.
 • Edit mode behaves again: collapse the keyboard and the page scrolls
   freely, and a single tap puts the cursor where you touched instead of
   throwing the note back to wherever you last typed.
+
+• Deleting a note now also removes the audio it had rendered. That audio
+  stayed on your device until you cleared the whole cache by hand, which
+  on a long talk is tens of megabytes per note.
 ```
 
 ---
@@ -99,3 +104,4 @@ For the next release's diff point.
 | `e7ac846` | Audio session and car controls after an interruption |
 | `1e28ae6` | Position kept wherever playback stopped |
 | `5a3882c`, `bcb7f69`, `6da17d7`, `69977c1` | Edit mode: scroll with the keyboard down, one-tap caret |
+| `807d353` | Deleting a note releases its rendered audio and listen position |
