@@ -1,11 +1,12 @@
 diff --git a/node_modules/expo-share-intent/plugin/build/ios/ShareExtensionViewController.swift b/node_modules/expo-share-intent/plugin/build/ios/ShareExtensionViewController.swift
-index f1f4b72..63bcc1c 100644
+index f1f4b72..6f5525c 100644
 --- a/node_modules/expo-share-intent/plugin/build/ios/ShareExtensionViewController.swift
 +++ b/node_modules/expo-share-intent/plugin/build/ios/ShareExtensionViewController.swift
-@@ -29,6 +29,13 @@ class ShareViewController: UIViewController {
+@@ -29,6 +29,14 @@ class ShareViewController: UIViewController {
  
    override func viewDidLoad() {
      super.viewDidLoad()
++    NSLog("[share] viewDidLoad (hideView \(hideView))")
 +    // PATCHED: release the completion gate on a timer as well as from
 +    // viewDidAppear, which is not guaranteed to run. A share that is slower
 +    // than it needs to be is a nuisance; one that never completes is a broken
@@ -16,10 +17,11 @@ index f1f4b72..63bcc1c 100644
      if hideView {
        view.backgroundColor = .clear
        view.isOpaque = false
-@@ -38,6 +45,12 @@ class ShareViewController: UIViewController {
+@@ -38,6 +46,13 @@ class ShareViewController: UIViewController {
  
    override func viewDidAppear(_ animated: Bool) {
      super.viewDidAppear(animated)
++    NSLog("[share] viewDidAppear")
 +    // PATCHED: viewDidAppear fires when the share sheet's presentation
 +    // transition completes. A small cushion covers any residual host-side
 +    // sheet animation, then any redirect requested early is released.
@@ -29,7 +31,18 @@ index f1f4b72..63bcc1c 100644
      if !hideView {
        handleViewLoad()
      }
-@@ -489,25 +502,93 @@ class ShareViewController: UIViewController {
+@@ -52,6 +67,10 @@ class ShareViewController: UIViewController {
+         dismissWithError(message: "No content found")
+         return
+       }
++      NSLog("[share] handleViewLoad: \(attachments.count) attachment(s)")
++      for (i, a) in attachments.enumerated() {
++        NSLog("[share] attachment \(i): \(a.registeredTypeIdentifiers.joined(separator: ", "))")
++      }
+       for (index, attachment) in (attachments).enumerated() {
+         if attachment.hasItemConformingToTypeIdentifier(imageContentType) {
+           await handleImages(content: content, attachment: attachment, index: index)
+@@ -489,25 +508,97 @@ class ShareViewController: UIViewController {
      }
    }
  
@@ -50,6 +63,7 @@ index f1f4b72..63bcc1c 100644
 +
 +  // Opens the gate once, from whichever of the two paths gets here first.
 +  private func settlePresentation() {
++    NSLog("[share] settle (already \(presentationSettled), pending \(pendingRedirectType != nil))")
 +    guard !presentationSettled else { return }
 +    presentationSettled = true
 +    if let pending = pendingRedirectType {
@@ -60,11 +74,13 @@ index f1f4b72..63bcc1c 100644
 +
 +  private func completeExtensionRequest() {
 +    guard !didCompleteExtension else { return }
++    NSLog("[share] completeRequest")
 +    didCompleteExtension = true
 +    extensionContext?.completeRequest(returningItems: [], completionHandler: nil)
 +  }
 +
    private func redirectToHostApp(type: RedirectType) {
++    NSLog("[share] redirect requested: \(type), settled \(presentationSettled)")
 +    // Never begin completion while the share sheet may still be presenting.
 +    guard presentationSettled else {
 +      pendingRedirectType = type
@@ -99,6 +115,7 @@ index f1f4b72..63bcc1c 100644
 +      return
 +    }
 +
++    NSLog("[share] opening \(url.absoluteString)")
 +    guard application.canOpenURL(url) else {
 +      NSLog("redirectToHostApp canOpenURL KO: \(shareProtocol)")
 +      self.dismissWithError(

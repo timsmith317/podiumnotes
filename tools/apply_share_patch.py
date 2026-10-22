@@ -40,6 +40,7 @@ OLD_APPEAR = """  override func viewDidAppear(_ animated: Bool) {
 
 NEW_APPEAR = """  override func viewDidAppear(_ animated: Bool) {
     super.viewDidAppear(animated)
+    NSLog("[share] viewDidAppear")
     // PATCHED: viewDidAppear fires when the share sheet's presentation
     // transition completes. A small cushion covers any residual host-side
     // sheet animation, then any redirect requested early is released.
@@ -56,6 +57,7 @@ OLD_LOAD = """  override func viewDidLoad() {
 
 NEW_LOAD = """  override func viewDidLoad() {
     super.viewDidLoad()
+    NSLog("[share] viewDidLoad (hideView \\(hideView))")
     // PATCHED: release the completion gate on a timer as well as from
     // viewDidAppear, which is not guaranteed to run. A share that is slower
     // than it needs to be is a nuisance; one that never completes is a broken
@@ -64,6 +66,14 @@ NEW_LOAD = """  override func viewDidLoad() {
       self?.settlePresentation()
     }
     if hideView {"""
+
+OLD_HANDLE = """      for (index, attachment) in (attachments).enumerated() {"""
+
+NEW_HANDLE = """      NSLog("[share] handleViewLoad: \\(attachments.count) attachment(s)")
+      for (i, a) in attachments.enumerated() {
+        NSLog("[share] attachment \\(i): \\(a.registeredTypeIdentifiers.joined(separator: ", "))")
+      }
+      for (index, attachment) in (attachments).enumerated() {"""
 
 OLD_REDIRECT = """  private func redirectToHostApp(type: RedirectType) {
     let nonce = UUID().uuidString
@@ -103,6 +113,7 @@ NEW_REDIRECT = """  // PATCHED (Podium Notes): see tools/apply_share_patch.py fo
 
   // Opens the gate once, from whichever of the two paths gets here first.
   private func settlePresentation() {
+    NSLog("[share] settle (already \\(presentationSettled), pending \\(pendingRedirectType != nil))")
     guard !presentationSettled else { return }
     presentationSettled = true
     if let pending = pendingRedirectType {
@@ -113,11 +124,13 @@ NEW_REDIRECT = """  // PATCHED (Podium Notes): see tools/apply_share_patch.py fo
 
   private func completeExtensionRequest() {
     guard !didCompleteExtension else { return }
+    NSLog("[share] completeRequest")
     didCompleteExtension = true
     extensionContext?.completeRequest(returningItems: [], completionHandler: nil)
   }
 
   private func redirectToHostApp(type: RedirectType) {
+    NSLog("[share] redirect requested: \\(type), settled \\(presentationSettled)")
     // Never begin completion while the share sheet may still be presenting.
     guard presentationSettled else {
       pendingRedirectType = type
@@ -146,6 +159,7 @@ NEW_REDIRECT = """  // PATCHED (Podium Notes): see tools/apply_share_patch.py fo
       return
     }
 
+    NSLog("[share] opening \\(url.absoluteString)")
     guard application.canOpenURL(url) else {
       NSLog("redirectToHostApp canOpenURL KO: \\(shareProtocol)")
       self.dismissWithError(
@@ -186,6 +200,7 @@ def main():
         return
 
     for name, old in (('viewDidLoad', OLD_LOAD), ('viewDidAppear', OLD_APPEAR),
+                      ('handleViewLoad', OLD_HANDLE),
                       ('redirectToHostApp', OLD_REDIRECT)):
         n = s.count(old)
         if n != 1:
@@ -197,6 +212,7 @@ def main():
 
     s = s.replace(OLD_LOAD, NEW_LOAD, 1)
     s = s.replace(OLD_APPEAR, NEW_APPEAR, 1)
+    s = s.replace(OLD_HANDLE, NEW_HANDLE, 1)
     s = s.replace(OLD_REDIRECT, NEW_REDIRECT, 1)
     TARGET.write_text(s)
     print('Patched. Now run:  npx patch-package expo-share-intent')
