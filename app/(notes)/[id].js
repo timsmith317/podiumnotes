@@ -469,9 +469,27 @@ export default function EditorScreen() {
   /// a line repeated in the note cannot throw the count off.
   function offsetFromTap(locationX, locationY) {
     const lines = linesRef.current;
-    if (!lines || !lines.length) return body.length;
+    // No line map, no answer. Returning body.length here — as this did — puts
+    // the caret at the very end of the note, which looks exactly like a
+    // deliberate jump and is impossible to tell apart from one. Null lets the
+    // caller leave the caret where it already was.
+    if (!lines || !lines.length) return null;
     let li = lines.findIndex(l => locationY >= l.y && locationY <= l.y + l.height);
-    if (li === -1) li = locationY < lines[0].y ? 0 : lines.length - 1;
+    if (li === -1) {
+      const last = lines[lines.length - 1];
+      if (locationY < lines[0].y) {
+        li = 0;
+      } else if (locationY > last.y + last.height) {
+        li = lines.length - 1;          // genuinely below the text — tap meant the end
+      } else {
+        // Inside the text but in a gap between two reported line boxes. The
+        // old code treated this the same as tapping past the end and jumped to
+        // the last line; a rounding gap of a pixel is not a request to go to
+        // the bottom of a twenty-minute sermon.
+        li = lines.reduce((best, l, i) =>
+          Math.abs(l.y - locationY) < Math.abs(lines[best].y - locationY) ? i : best, 0);
+      }
+    }
     const line = lines[li];
     const lt = line.text || '';
     const frac = line.width > 0
@@ -494,6 +512,13 @@ export default function EditorScreen() {
   function resumeEditAtTap(e) {
     const { locationX, locationY } = e.nativeEvent;
     const offset = offsetFromTap(locationX, locationY);
+    if (__DEV__) {
+      const n = (linesRef.current || []).length;
+      console.log('[unified] resumeEditAtTap: y', Math.round(locationY), 'lines', n,
+        '\u2192 caret', offset, 'of', body.length);
+    }
+    // A tap we could not resolve must not move the caret at all.
+    if (offset == null) { setEditFocused(true); return; }
     // No scroll pin here. The tap lands on a line the reader can already see,
     // so the caret reveal has nothing to reveal and nothing to contest — and a
     // pin running while the field mounts is what was eating the caret, turning
@@ -1087,7 +1112,9 @@ export default function EditorScreen() {
   function enterEdit() {
     const line = bandLine();
     const start = line ? line.start : 0;
-    if (__DEV__) console.log('[unified] enterEdit: scrollY', Math.round(scrollYRef.current), '→ caret', start);
+    if (__DEV__) console.log('[unified] enterEdit: scrollY', Math.round(scrollYRef.current),
+      'map', lineStartsRef.current.length, 'lines', (linesRef.current || []).length,
+      '→ caret', start, 'of', body.length);
     editPinYRef.current = scrollYRef.current;
     setSel({ start, end: start });
     setEditFocused(true);
