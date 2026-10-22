@@ -138,8 +138,26 @@ look identical from outside. Distinguish them by writing a marker *file* from
 `awakeFromNib` instead of logging — if the file appears, the instrument is at
 fault and not the code.
 
+**How exposed it is, measured rather than assumed.** macOS defaults
+third-party share extensions to OFF. Verified on 22 Oct after a clean reboot:
+the Podium Notes entries appear in System Settings -> Extensions -> Sharing and
+stay off, and Notes does not offer them. They were on for this developer's Mac
+because months of Xcode installs enabled them. A user installing from the App
+Store therefore never meets the hang — unless they go looking for the toggle and
+turn it on, which someone who shares happily on iPhone might well do. The App
+Store description says so plainly rather than leaving them to find out.
+
+That also means there is nothing to "pull": no per-extension mechanism exists to
+hide it on macOS while shipping it on iOS. Three were tried and none worked —
+LSMinimumSystemVersion and LSApplicationLaunchProhibited are both ignored for
+this, and narrowing the activation rule would hide it on iOS too, because Notes
+hands over plain text on both platforms. A survey of every iOS app on the test
+Mac found only one other share extension, Icedrive's, and it is absent from the
+Notes sheet for the dull reason that it does not accept text at all.
+
 **Why deferred.** iPhone and iPad are the priority and work. This has consumed
-several build cycles and is a platform question rather than an app one.
+several build cycles and is a platform question rather than an app one, and the
+default-off behaviour removes the urgency entirely.
 
 ---
 

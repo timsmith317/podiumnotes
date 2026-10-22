@@ -66,7 +66,8 @@ reason on a bug-fix release.
 - **App name** — `Podium Notes`
 - **Subtitle** — as shipped in 2.0.0
 - **Keywords** — as shipped in 2.0.0
-- **Description** — no feature changes, so nothing to describe differently
+- **Description** — one honest clarification, below. Descriptions are not
+  indexed, so editing one costs nothing in discovery
 - **Screenshots** — the UI is unchanged; the 2.0.0 set still represents the app
 - **Age rating, export compliance, App Privacy** — nothing in 2.0.1 touches
   data collection, encryption or permissions
@@ -75,6 +76,34 @@ reason on a bug-fix release.
 
 Editable without review, and independent of the version. The 2.0.0 text still
 reads correctly; replace it only if there is something to announce.
+
+---
+
+## Description — one line changed
+
+Sharing into the app does not work on the Mac: the share extension is launched
+and its view controller is never created, for reasons still unresolved. macOS
+keeps third-party share extensions switched off by default, so nobody meets this
+by accident — but someone who shares from their iPhone every week could go and
+enable it, and then it would simply fail. Saying so is cheaper than the support
+mail, and a description edit does not touch discovery.
+
+Replace:
+
+```
+• Share from Notes, Mail, Pages, or any app with a share sheet
+```
+
+with:
+
+```
+• Share from Notes, Mail, Pages, or any app with a share sheet, on iPhone
+  and iPad
+```
+
+Leave "Works on iPhone, iPad and Mac." as it stands — it is still true. Listen,
+the presenter view and voice follow all work on the Mac; only sharing in does
+not.
 
 ---
 
