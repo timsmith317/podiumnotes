@@ -360,6 +360,7 @@ export default function EditorScreen() {
   const scrollRef = useRef(null);        // the one ScrollView
   const scrollYRef = useRef(0);          // its current offset
   const linesRef = useRef([]);           // raw onTextLayout lines (present-mode Text)
+  const lastTapLineRef = useRef(-1);     // which line a tap resolved to, for the dev log
   const lineStartsRef = useRef([]);      // per-line char ranges + y (the one line map)
   const viewportHRef = useRef(0);
   const contentHRef = useRef(0);
@@ -496,16 +497,19 @@ export default function EditorScreen() {
       ? Math.min(Math.max((locationX - line.x) / line.width, 0), 1)
       : 0;
     const charInLine = Math.round(frac * lt.length);
-    let pos = 0;
-    for (let i = 0; i < li; i++) {
-      const t = lines[i].text || '';
-      const found = body.indexOf(t, pos);
-      pos = found === -1 ? pos + t.length : found + t.length;
-      if (body[pos] === '\n') pos += 1;
-    }
-    const foundLine = body.indexOf(lt, pos);
-    const lineStart = foundLine === -1 ? pos : foundLine;
-    return Math.min(lineStart + charInLine, body.length);
+    // Read the line map rather than walking the text a second time. This used
+    // to re-derive every line's start with its own loop, subtly different from
+    // computeLineStarts', and the two drifted: at the same scroll position
+    // bandLine and this disagreed by 480 characters. Worse, once the private
+    // walk's running position got ahead of the truth, indexOf found a LATER
+    // copy of the line's text and the caret jumped most of the way to the end
+    // of the note. One map, one answer, and tapping now agrees with the band
+    // by construction instead of by coincidence.
+    const ls = lineStartsRef.current;
+    const mapped = ls.length === lines.length ? ls[li] : null;
+    if (!mapped) return null;
+    lastTapLineRef.current = li;
+    return Math.min(mapped.start + charInLine, body.length);
   }
 
   // Tapping parked text resumes editing with the caret where the finger went.
@@ -515,7 +519,7 @@ export default function EditorScreen() {
     if (__DEV__) {
       const n = (linesRef.current || []).length;
       console.log('[unified] resumeEditAtTap: y', Math.round(locationY), 'lines', n,
-        '\u2192 caret', offset, 'of', body.length);
+        'line', lastTapLineRef.current, '\u2192 caret', offset, 'of', body.length);
     }
     // A tap we could not resolve must not move the caret at all.
     if (offset == null) { setEditFocused(true); return; }
