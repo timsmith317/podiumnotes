@@ -103,11 +103,43 @@ The diagnostics added in `229eb10` name which of the three endings it was:
 
 ## 5. Mac share extension hangs on "Send a Copy"
 
-Sharing from the Mac shows a white overlay box and never completes. Suspected
-cause is the `viewDidAppear` patch in the generated `ShareViewController`.
+Sharing from the Mac shows a white overlay box that never closes; the note
+never arrives. iPhone and iPad are unaffected and working.
 
-**Why deferred.** iPhone and iPad were the priority and are now working. The
-Mac path is separate code.
+**What is established.** The extension's view controller is never created.
+`awakeFromNib`, `loadView` and `viewDidLoad` all log, and none of them fire.
+The host agrees from its side: `SendActions: Found no existing scene`, and `No
+windows open yet` thirty times in one capture.
+
+**Ruled out, each with evidence rather than reasoning:**
+
+| Suspect | How it was eliminated |
+|---|---|
+| A crash | No report in `~/Library/Logs/DiagnosticReports`, across several runs |
+| A stale build | The binary in DerivedData was checked for the log strings and carried them, built minutes before each test |
+| The completion gate added 20 Sep | Gate now has a 1.5s timeout; hang is unchanged, and it hangs before the gate is reached |
+| A malformed bundle | `MainInterface.storyboardc` present, `NSExtensionMainStoryboard` names it, point identifier is `com.apple.share-services` |
+| Storyboard wiring | Initial view controller carries `customClass="ShareViewController"` |
+| Missing scene manifest | Added one to the extension's Info.plist, verified present in the built bundle. No change. Change reverted |
+| Mac not supporting this | Apple documents share extensions as supported for iPhone/iPad apps on Apple silicon |
+
+**Two things to check before building anything else**, both free:
+
+1. Share a note from Mac Notes to a *different* third-party app's share
+   extension. If those hang too, this is the Mac or Notes, not our code, and
+   everything above has been debugging the wrong process.
+2. System Settings → Privacy & Security → Extensions → Sharing — confirm
+   Podium Notes is enabled. The system launches the extension, so it should
+   be, but it costs nothing.
+
+**The next build-based test.** Only two possibilities remain: our code never
+runs, or it runs and its `NSLog` output never reaches the unified log. Those
+look identical from outside. Distinguish them by writing a marker *file* from
+`awakeFromNib` instead of logging — if the file appears, the instrument is at
+fault and not the code.
+
+**Why deferred.** iPhone and iPad are the priority and work. This has consumed
+several build cycles and is a platform question rather than an app one.
 
 ---
 
