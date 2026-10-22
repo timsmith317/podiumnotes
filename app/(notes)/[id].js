@@ -760,6 +760,7 @@ export default function EditorScreen() {
   const followRef = useRef(true);           // engaged until the reader scrolls
   const [following, setFollowing] = useState(true);
   const lastCueRef = useRef(null);
+  const cueOffsetRef = useRef(0);      // where the last cue resolved, so the next searches onward
   const cueYRef = useRef(null);        // content-y of the current cue's first line
   const nextYRef = useRef(null);       // …and of the next cue's, bounding the paragraph
   const autoScrollingRef = useRef(false);
@@ -832,12 +833,18 @@ export default function EditorScreen() {
     if (!lineStartsRef.current.length) computeLineStarts();
 
     if (cue !== lastCueRef.current) {
+      // Seeking backwards invalidates the running anchor: the right occurrence
+      // is now behind it, and searching forward from a stale anchor would match
+      // a later duplicate rather than fail.
+      if (lastCueRef.current && cue.time < lastCueRef.current.time) cueOffsetRef.current = 0;
       lastCueRef.current = cue;
-      cueYRef.current = lineYForOffset(offsetForCueText(cue.text, 0));
+      const off = offsetForCueText(cue.text, cueOffsetRef.current);
+      if (off >= 0) cueOffsetRef.current = off;
+      cueYRef.current = lineYForOffset(off);
       nextYRef.current = null;
     }
     if (nextYRef.current == null && next) {
-      nextYRef.current = lineYForOffset(offsetForCueText(next.text, 0));
+      nextYRef.current = lineYForOffset(offsetForCueText(next.text, cueOffsetRef.current));
     }
 
     const y0 = cueYRef.current;
