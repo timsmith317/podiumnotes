@@ -1,9 +1,25 @@
 diff --git a/node_modules/expo-share-intent/plugin/build/ios/ShareExtensionViewController.swift b/node_modules/expo-share-intent/plugin/build/ios/ShareExtensionViewController.swift
-index f1f4b72..6f5525c 100644
+index f1f4b72..fe4ae90 100644
 --- a/node_modules/expo-share-intent/plugin/build/ios/ShareExtensionViewController.swift
 +++ b/node_modules/expo-share-intent/plugin/build/ios/ShareExtensionViewController.swift
-@@ -29,6 +29,14 @@ class ShareViewController: UIViewController {
+@@ -27,8 +27,30 @@ class ShareViewController: UIViewController {
+   let pdfContentType: String = UTType.pdf.identifier
+   let vcardContentType: String = "public.vcard"
  
++  // PATCHED: the ladder below separates "the controller was never created"
++  // from "it was created and nothing ever asked for its view". On macOS the
++  // extension logs no viewDidLoad at all while the host reports no scene and no
++  // windows, and those two faults need completely different fixes.
++  override func awakeFromNib() {
++    super.awakeFromNib()
++    NSLog("[share] awakeFromNib")
++  }
++
++  override func loadView() {
++    super.loadView()
++    NSLog("[share] loadView")
++  }
++
    override func viewDidLoad() {
      super.viewDidLoad()
 +    NSLog("[share] viewDidLoad (hideView \(hideView))")
@@ -17,7 +33,7 @@ index f1f4b72..6f5525c 100644
      if hideView {
        view.backgroundColor = .clear
        view.isOpaque = false
-@@ -38,6 +46,13 @@ class ShareViewController: UIViewController {
+@@ -38,6 +60,13 @@ class ShareViewController: UIViewController {
  
    override func viewDidAppear(_ animated: Bool) {
      super.viewDidAppear(animated)
@@ -31,7 +47,7 @@ index f1f4b72..6f5525c 100644
      if !hideView {
        handleViewLoad()
      }
-@@ -52,6 +67,10 @@ class ShareViewController: UIViewController {
+@@ -52,6 +81,10 @@ class ShareViewController: UIViewController {
          dismissWithError(message: "No content found")
          return
        }
@@ -42,7 +58,7 @@ index f1f4b72..6f5525c 100644
        for (index, attachment) in (attachments).enumerated() {
          if attachment.hasItemConformingToTypeIdentifier(imageContentType) {
            await handleImages(content: content, attachment: attachment, index: index)
-@@ -489,25 +508,97 @@ class ShareViewController: UIViewController {
+@@ -489,25 +522,97 @@ class ShareViewController: UIViewController {
      }
    }
  

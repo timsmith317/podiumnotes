@@ -55,7 +55,21 @@ OLD_LOAD = """  override func viewDidLoad() {
     super.viewDidLoad()
     if hideView {"""
 
-NEW_LOAD = """  override func viewDidLoad() {
+NEW_LOAD = """  // PATCHED: the ladder below separates "the controller was never created"
+  // from "it was created and nothing ever asked for its view". On macOS the
+  // extension logs no viewDidLoad at all while the host reports no scene and no
+  // windows, and those two faults need completely different fixes.
+  override func awakeFromNib() {
+    super.awakeFromNib()
+    NSLog("[share] awakeFromNib")
+  }
+
+  override func loadView() {
+    super.loadView()
+    NSLog("[share] loadView")
+  }
+
+  override func viewDidLoad() {
     super.viewDidLoad()
     NSLog("[share] viewDidLoad (hideView \\(hideView))")
     // PATCHED: release the completion gate on a timer as well as from
